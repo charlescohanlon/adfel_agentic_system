@@ -3,5 +3,4 @@
 !.pixi/config.toml
 
 .env
-.chainlit
 __pycache__/
