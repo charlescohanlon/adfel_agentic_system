@@ -9,7 +9,9 @@ python -V
 which python
 
 # Prove chainlit is importable (dependency install + venv wiring)
+echo "Checking chainlit import..."
 python -c "import chainlit; print('chainlit import OK')"
+echo "Done checking chainlit import."
 
 # Start the server (unbuffered so logs show up immediately)
 exec python -u -m chainlit run app.py -h --host 0.0.0.0 --port ${PORT:-8000}
