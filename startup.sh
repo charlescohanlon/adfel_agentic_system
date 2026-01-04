@@ -10,7 +10,7 @@ which python
 
 # Prove chainlit is importable (dependency install + venv wiring)
 echo "Checking chainlit import..."
-chainlit --help
+python -c "import chainlit"
 echo "Done checking chainlit import."
 
 # Start the server (unbuffered so logs show up immediately)
