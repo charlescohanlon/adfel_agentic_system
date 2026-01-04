@@ -29,9 +29,7 @@ if not all(
         AZURE_SEARCH_INDEX_NAME,
     ]
 ):
-    raise ValueError(
-        "WARNING: One or more Azure environment variables are missing. Please check your .env file."
-    )
+    raise ValueError("One or more environment variables are missing.")
 
 
 async def get_search_client():
@@ -97,7 +95,7 @@ async def main(message: cl.Message):
     await msg.send()
 
     # Notify user we are searching
-    async with cl.Step(name="Azure AI Search") as step:
+    async with cl.Step(name="Document Search") as step:
         step.input = message.content
         docs = await search_documents(message.content)
 
@@ -136,7 +134,7 @@ Context:
     # 5. Append sources
     if docs:
         sources_text = "\n\n**Sources:**\n" + "\n".join(
-            [f"- {d['source']}" for d in docs]
+            set([f"- {d['source']}" for d in docs])
         )
         await msg.stream_token(sources_text)
 
