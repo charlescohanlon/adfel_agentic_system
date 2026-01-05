@@ -8,5 +8,10 @@ echo "LS=$(ls -la)"
 python -V
 which python
 
-export LITERAL_API_KEY=""
+# Force reinstall with correct versions before running
+pip install --force-reinstall --no-cache-dir \
+    opentelemetry-api==1.21.0 \
+    opentelemetry-sdk==1.21.0 \
+    opentelemetry-exporter-otlp-proto-grpc==1.21.0
+
 chainlit run app.py -h --host 0.0.0.0 --port $PORT
