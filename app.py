@@ -18,6 +18,8 @@ AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
 AZURE_SEARCH_API_KEY = os.getenv("AZURE_SEARCH_API_KEY")
 AZURE_SEARCH_INDEX_NAME = os.getenv("AZURE_SEARCH_INDEX_NAME")
 
+ENROLLMENT_FILE = "580-W26 Enrollment.xlsx"
+
 # Initialization check
 if not all(
     [
@@ -73,16 +75,41 @@ async def start():
     ).send()
 
 
+def get_enrolled_users():
+    """Load enrolled usernames and passwords from the Excel file."""
+    import pandas as pd
+
+    df = pd.read_excel(ENROLLMENT_FILE)
+    df["username"] = df["Email"].str.replace("@calpoly.edu", "", regex=False)
+    # Create a dict mapping username -> password
+    users = (
+        df[df["username"] != ""][["username", "password"]]
+        .set_index("username")["password"]
+        .to_dict()
+    )
+    return users
+
+
 @cl.password_auth_callback
 def auth_callback(username: str, password: str):
-    # Fetch the user matching username from your database
-    # and compare the hashed password with the value stored in the database
+    # Strip "@calpoly.edu" from username if present
+    clean_username = username.replace("@calpoly.edu", "")
+
+    # Admin login
     if (username, password) == ("admin", "admin"):
         return cl.User(
             identifier="admin", metadata={"role": "admin", "provider": "credentials"}
         )
-    else:
-        return None
+
+    # Check if username is in the enrolled students list and password matches
+    enrolled_users = get_enrolled_users()
+    if clean_username in enrolled_users and enrolled_users[clean_username] == password:
+        return cl.User(
+            identifier=clean_username,
+            metadata={"role": "student", "provider": "credentials"},
+        )
+
+    return None
 
 
 @cl.on_message

@@ -18,7 +18,7 @@
     },
     "auth": {
         "login": {
-            "title": "Login to access the app",
+            "title": "Login to the CSC x80 assistant",
             "form": {
                 "email": {
                     "label": "Email address",
