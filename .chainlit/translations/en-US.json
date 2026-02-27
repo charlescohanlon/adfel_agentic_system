@@ -18,12 +18,12 @@
     },
     "auth": {
         "login": {
-            "title": "Login to the CSC x80 assistant",
+            "title": "Login to the CSC 580 assistant",
             "form": {
                 "email": {
                     "label": "Email address",
                     "required": "email is a required field",
-                    "placeholder": "me@example.com"
+                    "placeholder": "me@calpoly.edu"
                 },
                 "password": {
                     "label": "Password",
@@ -48,7 +48,7 @@
                 "oauthAccountNotLinked": "To confirm your identity, sign in with the same account you used originally",
                 "emailSignin": "The e-mail could not be sent",
                 "emailVerify": "Please verify your email, a new email has been sent",
-                "credentialsSignin": "Sign in failed. Check the details you provided are correct",
+                "credentialsSignin": "The username and/or password entered was incorrect. Please try again.",
                 "sessionRequired": "Please sign in to access this page"
             }
         },
