@@ -239,11 +239,6 @@ async def main(message: cl.Message):
     # Add the current user message
     messages.append({"role": "user", "content": message.content})
 
-    from pprint import pprint
-
-    print("DEBUG:")
-    pprint(messages)
-
     # 3. Call Azure OpenAI with streaming and usage tracking
     try:
         stream = await openai_client.chat.completions.create(
