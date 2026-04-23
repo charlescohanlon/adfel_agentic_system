@@ -6,6 +6,7 @@ platforms = ["osx-64"]
 version = "0.1.0"
 
 [tasks]
+start = "chainlit run app.py -w"
 
 [dependencies]
 python = "3.12.*"
