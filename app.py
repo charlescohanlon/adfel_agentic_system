@@ -304,8 +304,11 @@ async def main(message: cl.Message):
 
     # 6. Append sources
     if docs:
+        def format_source(name):
+            return os.path.splitext(name)[0].replace("_", " ")
+
         sources_text = "\n\n**Sources:**\n" + "\n".join(
-            set([f"- {d['source']}" for d in docs])
+            set([f"- {format_source(d['source'])}" for d in docs])
         )
         await msg.stream_token(sources_text)
 
