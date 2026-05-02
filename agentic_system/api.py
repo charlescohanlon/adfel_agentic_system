@@ -11,14 +11,14 @@ Embedders only need this class:
     print(result.response)
     harness.end_session(state)
 
-To inject custom backends (e.g. an HTTP-API store later):
+To inject custom backends (e.g. an HTTP-API store or a different LLM):
 
     harness = LabHarness.build(
         config=SystemConfig(...),
         participant_store=MyRemoteParticipantStore(...),
         guardian_store=MyRemoteGuardianStore(...),
         knowledge_base=MyKB(...),
-        openai_client=my_preconfigured_client,
+        llm=MyLLMClient(...),
     )
 
 This module is the ONLY place a UI shell should import from `agentic_system` for
@@ -29,11 +29,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 from .agents import GuardianAgent, LabCompanion, ParticipantAgent
 from .config import SystemConfig
 from .kb import AzureSearchKB, KnowledgeBase, NullKB
+from .llm import AzureOpenAILLM, LLMClient
 from .models import SessionState, TurnResult
 from .orchestrator import Orchestrator
 from .store import (
@@ -59,6 +60,7 @@ class LabHarness:
     guardian: GuardianAgent
     companion: LabCompanion
     knowledge_base: KnowledgeBase
+    llm: LLMClient
     _orchestrator: Orchestrator
 
     # -------------------------------------------------------- construction
@@ -70,25 +72,26 @@ class LabHarness:
         participant_store: Optional[ParticipantStore] = None,
         guardian_store: Optional[GuardianStore] = None,
         knowledge_base: Optional[KnowledgeBase] = None,
-        openai_client: Optional[Any] = None,
+        llm: Optional[LLMClient] = None,
     ) -> "LabHarness":
         cfg = config or SystemConfig.from_env()
 
-        if not cfg.llm_configured and openai_client is None:
+        if not cfg.llm_configured and llm is None:
             raise RuntimeError(
-                "Azure OpenAI is not configured. Set AZURE_OPENAI_ENDPOINT, "
-                "AZURE_OPENAI_API_KEY, AZURE_OPENAI_DEPLOYMENT_NAME — or pass "
-                "an openai_client to LabHarness.build()."
+                "Default LLM (Azure OpenAI) is not configured. Set "
+                "AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, "
+                "AZURE_OPENAI_DEPLOYMENT_NAME — or pass an `llm` to "
+                "LabHarness.build()."
             )
 
-        llm = openai_client or _build_default_llm(cfg)
+        llm_client: LLMClient = llm or _build_default_llm(cfg)
         p_store = participant_store or SqliteParticipantStore(cfg.participant_db_path)
         g_store = guardian_store or SqliteGuardianStore(cfg.guardian_db_path)
         kb = knowledge_base or _build_default_kb(cfg)
 
-        participant = ParticipantAgent(store=p_store, openai_client=llm, config=cfg)
-        guardian = GuardianAgent(store=g_store, openai_client=llm, config=cfg)
-        companion = LabCompanion(openai_client=llm, config=cfg)
+        participant = ParticipantAgent(store=p_store, llm=llm_client, config=cfg)
+        guardian = GuardianAgent(store=g_store, llm=llm_client, config=cfg)
+        companion = LabCompanion(llm=llm_client, config=cfg)
 
         orchestrator = Orchestrator(
             config=cfg,
@@ -99,8 +102,8 @@ class LabHarness:
         )
 
         logger.info(
-            "LabHarness built: student_id=%s lab_id=%s kb=%s",
-            cfg.student_id, cfg.lab_id, type(kb).__name__,
+            "LabHarness built: student_id=%s lab_id=%s kb=%s llm=%s",
+            cfg.student_id, cfg.lab_id, type(kb).__name__, type(llm_client).__name__,
         )
         return cls(
             config=cfg,
@@ -108,6 +111,7 @@ class LabHarness:
             guardian=guardian,
             companion=companion,
             knowledge_base=kb,
+            llm=llm_client,
             _orchestrator=orchestrator,
         )
 
@@ -123,13 +127,12 @@ class LabHarness:
 
 
 # --------------------------------------------------------------- defaults
-def _build_default_llm(config: SystemConfig) -> Any:
-    """Build a sync `AzureOpenAI` client from config. Lazy import."""
-    from openai import AzureOpenAI
-
-    return AzureOpenAI(
-        azure_endpoint=config.azure_openai_endpoint,
+def _build_default_llm(config: SystemConfig) -> LLMClient:
+    """Build the default `AzureOpenAILLM` from config."""
+    return AzureOpenAILLM(
+        endpoint=config.azure_openai_endpoint,
         api_key=config.azure_openai_api_key,
+        deployment=config.azure_openai_deployment,
         api_version=config.azure_openai_api_version,
     )
 

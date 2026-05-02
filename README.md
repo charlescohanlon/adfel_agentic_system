@@ -1,131 +1,260 @@
-# CSC x80 Assistant Agent
+# ADFEL — CSC 580 Lab Companion
 
-## Overview
+A student-facing agentic tutoring system for Cal Poly's CSC 580 lab course. The
+assistant helps students work through assignments by giving **hints, not
+answers**, while a separate Guardian agent enforces academic integrity by
+classifying every question and verifying every draft response before it reaches
+the student.
 
-This project is a **Retrieval-Augmented Generation (RAG)** AI assistant designed for Cal Poly's CSC 580 course. It allows enrolled students to ask questions about course materials (assignments, syllabus, textbook content) and receive AI-generated answers grounded in the actual course documents. The system includes user authentication, per-user token usage tracking, and is deployed as a containerized web application on Azure.
+The repo is split in two:
 
-### Chainlit
+- **`agentic_system/`** — a UI-agnostic Python package that owns all the agents,
+  policy, storage, and retrieval logic. It exposes a single facade,
+  `LabHarness`, and knows nothing about the web framework hosting it.
+- **`app.py`** — a thin [Chainlit](https://chainlit.io) shell that wires the
+  harness into a chat UI. It is the *only* place Chainlit is imported;
+  swapping it for a CLI, a custom frontend, or a Slack bot requires no changes
+  inside the package.
 
-Chainlit is the web framework used to build the conversational UI using Python. It provides a ChatGPT-like interface with support for:
-- User authentication (`@cl.password_auth_callback`)
-- Session management and conversation history
-- Streaming responses from the LLM
-- Multi-step visualization (e.g., showing "class resource search" step)
+## How it works
 
-### app.py
+Every student turn runs through this pipeline (`agentic_system/orchestrator.py`):
 
-The main application file containing all the core logic:
-- **Authentication**: Password-based login for enrolled students (credentials stored in Excel DB) and admin users
-- **RAG Pipeline**: Retrieves relevant documents from Azure AI Search, constructs a context-aware prompt, and streams responses from Azure OpenAI
-- **Token Tracking**: Monitors and limits per-user token usage to manage API costs
-- **Conversation History**: Maintains multi-turn conversation context (limited to recent messages to avoid context overflow)
+```
+question
+    │
+    ▼
+Guardian.validate ──► classify (CONCEPTUAL / PROCEDURAL / DIRECT_SOLUTION / …)
+    │                 derive guidance level (FULL / MODERATE / MINIMAL / REJECTED)
+    │                 escalate session after 3 violations
+    │
+    ▼
+KnowledgeBase.search ──► RAG context (Azure AI Search; optional)
+    │
+    ▼
+LabCompanion.respond ──► draft (constrained by guidance level)
+    │
+    ▼
+Guardian.verify ──► pass / fail with feedback
+    │           (on fail: retry up to VERIFIER_MAX_RETRIES; then safe fallback)
+    │
+    ▼
+Participant.log_interaction (best-effort telemetry)
+    │
+    ▼
+response to student
+```
 
-#### Note on Conversation History
+### The three agents
 
-The Azure AI Search service exhibits a high recall (low precision), meaning it will often retrieve documents that are not relevant to the user's query.
-This bloats the context window and increases token usage.
-As a temporary measure, we only use the last 2 message exchanges to build the context for the next response.
+| Agent | Role | Backed by |
+|---|---|---|
+| **Lab Companion** | The only student-facing agent. Generates hint-style responses constrained by the per-turn guidance level. | `LLMClient` |
+| **Guardian** | Two gates: input classification (academic-integrity policy) and output verification (does the draft give away the answer?). Tracks violations and escalates the session at the 3rd violation. | `LLMClient` + SQLite (`guardian.db`) |
+| **Participant** | Learning-context tracker. Classifies each question's type/hint-level/difficulty and builds a narrative summary of the student's history that the Lab Companion uses as context. | `LLMClient` + SQLite (`participant.db`) |
 
-### .env
+The model is reached only through the `LLMClient` protocol
+(`agentic_system/llm/base.py`). Two implementations ship in-package:
 
-Environment configuration file containing sensitive credentials and configuration:
-- `AZURE_OPENAI_ENDPOINT`: LLM model endpoint URL
-- `AZURE_OPENAI_API_KEY`: LLM model API key
-- `AZURE_OPENAI_DEPLOYMENT_NAME`: LLM model deployment name
-- `AZURE_OPENAI_API_VERSION`: Azure OpenAI LLM API version
-- `AZURE_SEARCH_ENDPOINT`: Azure AI Search endpoint URL
-- `AZURE_SEARCH_API_KEY`: Azure AI Search API key
-- `AZURE_SEARCH_INDEX_NAME`: Azure AI Search index name
-- `CHAINLIT_AUTH_SECRET`: Secret key for Chainlit's authentication system
+- `AzureOpenAILLM` — default; talks to Azure OpenAI via the `openai` SDK.
+- `ClaudeLLM` — talks to Anthropic via the `anthropic` SDK
+  (`ANTHROPIC_API_KEY` by default; pass `auth_token=` for an OAuth bearer).
 
-### create_passwords.ipynb
+Any object exposing a `complete(messages, *, temperature, max_tokens, json_mode)`
+method can be injected at build time. Nothing under `agentic_system/` outside
+the `llm/` package imports a vendor SDK.
 
-A Jupyter notebook utility for managing the user database (`580-W26-DB.xlsx`):
-- Generates unique 16-character alphanumeric passwords for each enrolled student
-- Initializes/resets token usage limits (default: 3,000,000 tokens per user) and current usage counters
+### Public API
 
-### Dockerfile
+The embedder (`app.py` today; anything else tomorrow) only needs the `LabHarness` facade:
 
-Defines the container image for deployment:
-- Based on `python:3.12-slim`
-- Installs dependencies from `requirements.txt`
-    - `requirements.txt` should mirror `pixi.toml` (if you use pixi to manage dependencies)
-- Runs Chainlit on port 8000
+```python
+from agentic_system import LabHarness
 
-### pixi
+harness = LabHarness.build()              # env-driven defaults
+state   = harness.start_session()
+result  = harness.handle_turn(state, "what does KVL mean?")
+print(result.response)
+harness.end_session(state)
+```
 
-[Pixi](https://pixi.sh/) is used for local development environment management. The `pixi.toml` file specifies:
-- Python 3.12 as the base interpreter
-- Conda dependencies
-- PyPI dependencies (Chainlit, OpenAI SDK, Azure SDKs, pandas, etc.)
+To swap backends (custom KB, remote-API store, a different LLM):
 
-### requirements.txt
+```python
+from agentic_system import LabHarness, ClaudeLLM
 
-Python dependencies for Docker/pip-based installation, mirroring the `pixi.toml` PyPI dependencies plus OpenTelemetry packages for observability.
+# Use Claude via the Anthropic SDK (reads ANTHROPIC_API_KEY by default):
+harness = LabHarness.build(llm=ClaudeLLM())
 
-## Azure Resources
+# Or compose multiple swaps:
+harness = LabHarness.build(
+    config=SystemConfig(...),
+    participant_store=MyRemoteStore(...),
+    guardian_store=MyRemoteStore(...),
+    knowledge_base=MyKB(...),
+    llm=MyLLMClient(...),
+)
+```
 
-To set up this project with Azure, you will need to create the following resources.
+`ParticipantStore`, `GuardianStore`, `KnowledgeBase`, and `LLMClient` are
+all `typing.Protocol`s — implement the methods, pass the instance in. The
+LLM protocol is one method:
 
-### Foundry / Foundry Project
+```python
+class MyLLMClient:
+    def complete(
+        self,
+        messages: list[dict],
+        *,
+        temperature: float = 0.4,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
+    ) -> str: ...
+```
 
-Azure AI Foundry (formerly Azure AI Studio) project for managing the AI models. This hosts the GPT deployment (e.g., `gpt-5.2-chat`) used for generating responses to student queries.
+## Repository layout
 
-You'll need to create an LLM deployment and an embedding model deployment in Foundry. The embedding model deployment will be used for document embedding in the Azure AI Search index.
+```
+adfel_agentic_system/
+├── app.py                       Chainlit UI shell (only place chainlit is imported)
+├── agentic_system/              UI-agnostic package
+│   ├── __init__.py              Public re-exports
+│   ├── api.py                   LabHarness facade — single public entry point
+│   ├── config.py                SystemConfig dataclass + from_env()
+│   ├── orchestrator.py          Per-turn pipeline (validate → RAG → draft → verify)
+│   ├── models.py                Enums, Pydantic records, result dataclasses
+│   ├── agents/
+│   │   ├── lab_companion.py     Student-facing hint generator
+│   │   ├── guardian.py          Integrity gate (validate + verify)
+│   │   └── participant.py       Learning-context tracker
+│   ├── policy/
+│   │   └── engine.py            Pure: classification prompt, verification prompt,
+│   │                            and the (classification, counters) → guidance mapping
+│   ├── llm/
+│   │   ├── base.py              LLMClient Protocol — single chat-completion method
+│   │   ├── azure_openai.py      AzureOpenAILLM (the only file that imports `openai`)
+│   │   └── claude.py            ClaudeLLM (the only file that imports `anthropic`)
+│   ├── kb/
+│   │   ├── base.py              KnowledgeBase Protocol + RetrievedDoc + format_context
+│   │   ├── azure_search.py      AzureSearchKB (lazy-imports the SDK)
+│   │   └── null.py              NullKB — used when search is unconfigured
+│   └── store/
+│       ├── base.py              ParticipantStore + GuardianStore Protocols
+│       └── sqlite.py            Default SQLite implementations of both
+├── data/                        SQLite files live here (gitignored)
+├── public/                      Chainlit static assets (logo, favicon, theme)
+├── pixi.toml                    Local dev environment + tasks
+├── requirements.txt             Pip dependencies (mirrors pixi for Docker)
+├── Dockerfile                   Container build
+├── docker-compose.yml           One-command local container run
+└── config.yaml                  Azure Container App deployment manifest
+```
 
-### (App Service) Domain
+## Local development
 
-Custom domain configuration for the Container App, allowing the assistant to be accessed via a friendly URL (e.g., `csc580-assistant.com`) rather than the default Azure-generated domain.
+The project uses [pixi](https://pixi.sh/) for environment management.
 
-### DNS Zone
+```bash
+# 1. copy env template and fill in your Azure OpenAI credentials
+cp .env.example .env
+$EDITOR .env
 
-Azure DNS Zone to manage DNS records for the custom domain, routing traffic to the Container App's IP address. You'll need to create a A record for the custom domain that points to the Container App's IP address. You'll also need to create a TXT record with the name `asuid` as instructed by Azure.
+# 2. install dependencies
+pixi install
 
-### Azure AI services multi-service account
+# 3. run the Chainlit dev server (auto-reload on save)
+pixi run dev
+# → http://localhost:8000
+```
 
-A multi-service Azure Cognitive Services resource that provides access to AI "skills."
-This is what allows you to chunk large documents to create embeddings for the Azure AI Search index (in Search Service).
+Other tasks:
 
-### Search Service
+```bash
+pixi run start      # production-style: chainlit run -h --host 0.0.0.0 --port 8000
+pixi run reset-db   # nuke local SQLite stores under data/
+```
 
-Azure AI Search (formerly Azure Cognitive Search) instance for hosting the index. You will need to create an index (and set it's name in the environment variables). The index should be configured to use the embedding deployment from Foundry. You'll need to set up a skillset to chunk the documents and create embeddings for the index.
+`pixi.toml` sets `PARTICIPANT_DB_PATH` and `GUARDIAN_DB_PATH` to absolute paths
+under `data/` automatically when the env activates.
 
-The AI Search service has a limit for document sizes. It will truncate any and all documents over the threshold. If a file is too large, it will deny its upload altogether. When a search is conducted, the entire document is retrieved and provided to the LLM.
-So, for instance, if you were to include a whole textbook (although I doubt it'd fit as one document) it would be truncated to the limit, and be retrieved in its entirety.
+### Running with Docker
 
-My recommendation is manually breaking up documents like textbooks into separate documents, one per chapter or section.
+```bash
+docker compose up --build
+```
 
-### Storage Account
+`docker-compose.yml` mounts `./data` to `/data` inside the container so the
+SQLite files persist across restarts.
 
-Azure Storage Account with Blob Storage and Azure Files share (`appdata-storage`) used for:
-- Storing documents used for AI Search
-- Persistent storage of the student database file (`580-W26-DB.xlsx`) across container restarts
-- Mounted at `/appdata` in the container
+## Environment variables
 
-#### Blob Storage
+All env reads happen in `SystemConfig.from_env()` (`agentic_system/config.py`)
+or in `app.py`. The agents themselves never touch `os.environ`.
 
-Blob storage is used to store the documents used for AI Search. You'll need to create a blob storage instance and set the connection string in the environment variables.
+| Variable | Required? | Notes |
+|---|---|---|
+| `AZURE_OPENAI_ENDPOINT` | yes | Used by all three agents. |
+| `AZURE_OPENAI_API_KEY` | yes | |
+| `AZURE_OPENAI_DEPLOYMENT_NAME` | yes | The chat-model deployment (e.g. `gpt-4o`). |
+| `AZURE_OPENAI_API_VERSION` | no | Defaults to `2024-12-01-preview`. |
+| `AZURE_SEARCH_ENDPOINT` | no | Leave the three `AZURE_SEARCH_*` blank to disable RAG (the harness falls back to `NullKB`). |
+| `AZURE_SEARCH_API_KEY` | no | |
+| `AZURE_SEARCH_INDEX_NAME` | no | |
+| `STUDENT_ID` | no | Single-user prototype identity. Default `default-student`. |
+| `LAB_ID` | no | Default `default-lab`. |
+| `COURSE_ID` | no | Default `CSC580`. |
+| `PARTICIPANT_DB_PATH` | no | Default `data/participant.db`. |
+| `GUARDIAN_DB_PATH` | no | Default `data/guardian.db`. |
+| `RAG_TOP_N` | no | How many docs to retrieve. Default `3`. |
+| `RAG_MAX_CONTENT_LENGTH` | no | Per-doc truncation in the prompt. Default `1000`. |
+| `HISTORY_KEEP_TURNS` | no | Conversation history window passed to the Lab Companion. Default `6`. |
+| `VERIFIER_MAX_RETRIES` | no | Retries when Guardian rejects a draft. Default `2`. |
+| `LOG_LEVEL` | no | `INFO` by default. Set `DEBUG` to see classifications/retries inline in the UI. |
 
-This must be done before creating the AI Search index. You select the blob storage instance when creating the index.
+## Policy at a glance
 
-#### File Storage
+`agentic_system/policy/engine.py` is intentionally a pure module so the
+behavior is auditable in one place.
 
-File storage is used to store the Excel file used as a database for student authentication and usage limits. You'll need to create a file storage instance and properly mount it to the container at `/appdata`. The file storage is meant to be persistent across container restarts and updates.
+**Question classifications** (input gate):
+- `CONCEPTUAL`, `PROCEDURAL`, `CLARIFICATION` — allowed.
+- `DIRECT_SOLUTION` — hard rejection.
+- `ANSWER_FARMING` — incremental extraction across turns; allowed but throttled.
 
-Unfortunately, you need to mess around with the Azure container app service JSON settings to configure mounting the file storage to the container. 
+**Guidance levels** (what shape the Lab Companion's response takes):
+- `FULL` — normal hint-style tutoring.
+- `MODERATE` — nudge harder toward independence; shorter answers.
+- `MINIMAL` — at most one hint, no elaboration, no code.
+- `REJECTED` — politely decline.
 
-### Container App
+**Throttling rules** (`derive_guidance_level`):
+- 3 violations in a session → escalate; all subsequent turns rejected.
+- Q12+ → at least `MODERATE`. Q14+ → `MINIMAL`. Q16+ → `REJECTED`.
+- Any `DIRECT_SOLUTION` classification → `REJECTED` for that turn.
+- Any `ANSWER_FARMING` classification → `MINIMAL` for that turn.
 
-The Azure Container App running the Chainlit application:
-- Name: `x80-assistant-app` (or whatever you want to name it)
-- Configured with 1 CPU and 2GB memory (or whatever you want to configure)
-- Auto-scales from 0 to 10 replicas based on demand
-- Exposes port 8000 with HTTPS ingress
+**Failure modes** are all fail-safe: a classifier error defaults to
+`PROCEDURAL` / `MODERATE`; a verifier error passes the draft through; a
+companion error returns a polite "please rephrase" message.
 
-### Container Apps Environment
+## Azure deployment
 
-The managed environment (`x80-environment`) that hosts the Container App, providing networking, logging, and scaling infrastructure.
+The app currently deploys as an Azure Container App
+(`config.yaml`). Beyond Azure OpenAI itself, you will typically also want:
 
-### Container Registry
+- **Azure AI Foundry** — host the chat-model deployment, and (if RAG is on)
+  the embedding-model deployment used to build the Search index.
+- **Azure AI Search** — host the index. Configure a skillset to chunk
+  documents and produce embeddings via the Foundry embedding deployment.
+  Index field names expected by `AzureSearchKB`: `parent_id`, `chunk_id`,
+  `chunk`, `title`.
+- **Azure Storage** — Blob for the documents that feed AI Search; an Azure
+  Files share if you want SQLite stores to persist across container
+  restarts (mount it into the container at the path you point
+  `PARTICIPANT_DB_PATH` / `GUARDIAN_DB_PATH` to).
+- **Container Registry + Container App + Container Apps Environment** —
+  see `config.yaml` for the deployed resource shape.
 
-Azure Container Registry (`x80registry.azurecr.io`) storing the Docker images for the application. Images are tagged (e.g., `chainlit-app:v1`) and pulled by the Container App during deployment.
+> ⚠️ Azure AI Search truncates documents above its size limit and rejects
+> oversized files outright. When uploading textbook material, split it
+> manually into per-chapter or per-section files before indexing.

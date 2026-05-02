@@ -1,7 +1,7 @@
 """
 Participant Agent — learning-context tracker.
 
-Pure constructor injection: takes a `ParticipantStore`, an LLM client, and
+Pure constructor injection: takes a `ParticipantStore`, an `LLMClient`, and
 the active config. No globals; no env reads at runtime.
 """
 
@@ -11,9 +11,10 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Optional
 
 from ..config import SystemConfig
+from ..llm import LLMClient
 from ..models import StudentContext
 from ..store.base import ParticipantStore
 
@@ -25,11 +26,11 @@ class ParticipantAgent:
         self,
         *,
         store: ParticipantStore,
-        openai_client: Any,
+        llm: LLMClient,
         config: SystemConfig,
     ) -> None:
         self._store = store
-        self._llm = openai_client
+        self._llm = llm
         self._config = config
         self._store.init()
 
@@ -46,14 +47,13 @@ class ParticipantAgent:
             "Return ONLY valid JSON, no other text."
         )
         try:
-            response = self._llm.chat.completions.create(
-                model=self._config.azure_openai_deployment,
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
+            raw = self._llm.complete(
+                [{"role": "user", "content": prompt}],
                 temperature=0.1,
                 max_tokens=120,
+                json_mode=True,
             )
-            return json.loads(response.choices[0].message.content)
+            return json.loads(raw)
         except Exception as e:
             logger.warning("Classification failed (fail-safe applied): %s", e)
             return {"question_type": "other", "hint_level": 1, "difficulty": "medium"}
@@ -111,13 +111,11 @@ class ParticipantAgent:
             "best support this student. Be specific. No bullet points."
         )
         try:
-            response = self._llm.chat.completions.create(
-                model=self._config.azure_openai_deployment,
-                messages=[{"role": "user", "content": prompt}],
+            return self._llm.complete(
+                [{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=180,
             )
-            return response.choices[0].message.content.strip()
         except Exception as e:
             logger.warning("Summary LLM failed; using rule-based fallback: %s", e)
             summary = (

@@ -1,7 +1,7 @@
 """
 Guardian Agent — input + output policy gate.
 
-Constructor injection: takes a `GuardianStore`, an LLM client, and config.
+Constructor injection: takes a `GuardianStore`, an `LLMClient`, and config.
 """
 
 from __future__ import annotations
@@ -9,9 +9,10 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 
 from ..config import SystemConfig
+from ..llm import LLMClient
 from ..models import (
     GuidanceLevel,
     QuestionClassification,
@@ -39,11 +40,11 @@ class GuardianAgent:
         self,
         *,
         store: GuardianStore,
-        openai_client: Any,
+        llm: LLMClient,
         config: SystemConfig,
     ) -> None:
         self._store = store
-        self._llm = openai_client
+        self._llm = llm
         self._config = config
         self._store.init()
 
@@ -135,8 +136,7 @@ class GuardianAgent:
                     "question_count": question_count,
                     "violation_count": violation_count,
                 },
-                openai_client=self._llm,
-                deployment_name=self._config.azure_openai_deployment,
+                llm=self._llm,
             )
         except Exception as e:
             logger.error("Classifier error (fail-safe applied): %s", e, exc_info=True)
@@ -242,8 +242,7 @@ class GuardianAgent:
                 draft_response=draft_response,
                 guidance_level=guidance_level,
                 classification=classification,
-                openai_client=self._llm,
-                deployment_name=self._config.azure_openai_deployment,
+                llm=self._llm,
             )
             passes = result.passes
             reason = result.reason

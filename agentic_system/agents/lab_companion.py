@@ -1,7 +1,7 @@
 """
 Lab Companion — the only student-facing agent.
 
-Constructor injection: takes an LLM client and the active config.
+Constructor injection: takes an `LLMClient` and the active config.
 Knowledge-base lookup is performed by the orchestrator and passed in via
 `rag_context`, so this agent has zero retrieval dependencies of its own.
 """
@@ -9,9 +9,10 @@ Knowledge-base lookup is performed by the orchestrator and passed in via
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Optional
 
 from ..config import SystemConfig
+from ..llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +107,8 @@ def _build_system_prompt(
 
 
 class LabCompanion:
-    def __init__(self, *, openai_client: Any, config: SystemConfig) -> None:
-        self._llm = openai_client
+    def __init__(self, *, llm: LLMClient, config: SystemConfig) -> None:
+        self._llm = llm
         self._config = config
 
     def respond(
@@ -137,9 +138,4 @@ class LabCompanion:
         messages.extend(history_trimmed)
         messages.append({"role": "user", "content": question})
 
-        response = self._llm.chat.completions.create(
-            model=self._config.azure_openai_deployment,
-            messages=messages,
-            temperature=0.4,
-        )
-        return (response.choices[0].message.content or "").strip()
+        return self._llm.complete(messages, temperature=0.4)

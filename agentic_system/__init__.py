@@ -11,20 +11,22 @@ Public API:
     print(result.response, result.guidance_level)
     harness.end_session(state)
 
-Custom backends (swap SQLite for a remote API, or KB for a different
-retriever) can be injected:
+Custom backends (swap SQLite for a remote API, KB for a different
+retriever, or the LLM for a different model) can be injected:
 
     harness = LabHarness.build(
         config=SystemConfig.from_env(),
         participant_store=MyRemoteStore(...),
         guardian_store=MyRemoteStore(...),
         knowledge_base=MyKB(...),
+        llm=MyLLMClient(...),
     )
 """
 
 from .api import LabHarness
 from .config import SystemConfig
 from .kb import AzureSearchKB, KnowledgeBase, NullKB, RetrievedDoc
+from .llm import AzureOpenAILLM, ClaudeLLM, LLMClient
 from .models import (
     GuidanceLevel,
     QuestionClassification,
@@ -60,4 +62,7 @@ __all__ = [
     "RetrievedDoc",
     "AzureSearchKB",
     "NullKB",
+    "LLMClient",
+    "AzureOpenAILLM",
+    "ClaudeLLM",
 ]

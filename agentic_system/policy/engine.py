@@ -7,8 +7,9 @@ Two pure functions and one pure mapping:
   verify_response()      — output gate (NEW in v1)
   derive_guidance_level() — pure mapping from classification + counters → guidance.
 
-LLM calls go through whatever `openai_client` the caller passes in. No
-client construction here — the agents own that.
+LLM calls go through whatever `LLMClient` the caller passes in. No
+client construction here — the agents own that, and the LLM provider is
+hidden behind the `LLMClient` protocol.
 """
 
 from __future__ import annotations
@@ -16,8 +17,9 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Optional
 
+from ..llm import LLMClient
 from ..models import GuidanceLevel, QuestionClassification
 
 logger = logging.getLogger(__name__)
@@ -184,8 +186,7 @@ def classify_question(
     question_text: str,
     conversation_history: list[dict],
     session_context: dict,
-    openai_client: Any,
-    deployment_name: str,
+    llm: LLMClient,
 ) -> ClassificationResult:
     history_text = (
         "\n".join(
@@ -204,17 +205,16 @@ def classify_question(
         f"Student's current question:\n{question_text}"
     )
 
-    response = openai_client.chat.completions.create(
-        model=deployment_name,
-        messages=[
+    raw = llm.complete(
+        [
             {"role": "system", "content": CLASSIFICATION_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
-        response_format={"type": "json_object"},
         temperature=0.0,
-        max_completion_tokens=400,
+        max_tokens=400,
+        json_mode=True,
     )
-    parsed = json.loads(response.choices[0].message.content)
+    parsed = json.loads(raw)
     return ClassificationResult(
         classification=QuestionClassification(parsed["classification"]),
         confidence=float(parsed.get("confidence", 1.0)),
@@ -228,8 +228,7 @@ def verify_response(
     draft_response: str,
     guidance_level: GuidanceLevel,
     classification: Optional[QuestionClassification],
-    openai_client: Any,
-    deployment_name: str,
+    llm: LLMClient,
 ) -> VerificationResult:
     user_content = (
         f"Guidance level for this turn: {guidance_level.value}\n"
@@ -241,17 +240,16 @@ def verify_response(
         "or is it an appropriate hint?"
     )
 
-    response = openai_client.chat.completions.create(
-        model=deployment_name,
-        messages=[
+    raw = llm.complete(
+        [
             {"role": "system", "content": VERIFICATION_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
-        response_format={"type": "json_object"},
         temperature=0.0,
-        max_completion_tokens=400,
+        max_tokens=400,
+        json_mode=True,
     )
-    parsed = json.loads(response.choices[0].message.content)
+    parsed = json.loads(raw)
     return VerificationResult(
         passes=bool(parsed.get("passes", True)),
         confidence=float(parsed.get("confidence", 1.0)),
