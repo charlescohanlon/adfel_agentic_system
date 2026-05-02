@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from ..config import AieicConfig
+from ..config import SystemConfig
 from ..models import StudentContext
 from ..store.base import ParticipantStore
 
@@ -26,7 +26,7 @@ class ParticipantAgent:
         *,
         store: ParticipantStore,
         openai_client: Any,
-        config: AieicConfig,
+        config: SystemConfig,
     ) -> None:
         self._store = store
         self._llm = openai_client

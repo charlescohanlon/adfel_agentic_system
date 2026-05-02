@@ -1,4 +1,4 @@
-"""Storage abstraction for the AIEIC harness.
+"""Storage abstraction for the ADFEL harness.
 
 Two protocols — `ParticipantStore` and `GuardianStore` — define the entire
 persistence surface. The default implementations are SQLite-backed

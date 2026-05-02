@@ -23,7 +23,7 @@ from typing import Optional
 
 from .agents import GuardianAgent, LabCompanion, ParticipantAgent
 from .agents.lab_companion import SAFE_FALLBACK
-from .config import AieicConfig
+from .config import SystemConfig
 from .kb import KnowledgeBase, format_context
 from .models import (
     GuidanceLevel,
@@ -41,7 +41,7 @@ class Orchestrator:
     def __init__(
         self,
         *,
-        config: AieicConfig,
+        config: SystemConfig,
         participant: ParticipantAgent,
         guardian: GuardianAgent,
         companion: LabCompanion,

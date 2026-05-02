@@ -1,5 +1,5 @@
 """
-Public facade for the AIEIC student-facing harness.
+Public facade for the ADFEL student-facing harness.
 
 Embedders only need this class:
 
@@ -14,7 +14,7 @@ Embedders only need this class:
 To inject custom backends (e.g. an HTTP-API store later):
 
     harness = LabHarness.build(
-        config=AieicConfig(...),
+        config=SystemConfig(...),
         participant_store=MyRemoteParticipantStore(...),
         guardian_store=MyRemoteGuardianStore(...),
         knowledge_base=MyKB(...),
@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from .agents import GuardianAgent, LabCompanion, ParticipantAgent
-from .config import AieicConfig
+from .config import SystemConfig
 from .kb import AzureSearchKB, KnowledgeBase, NullKB
 from .models import SessionState, TurnResult
 from .orchestrator import Orchestrator
@@ -48,13 +48,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class LabHarness:
-    """The single public entry point of the AIEIC system.
+    """The single public entry point of the ADFEL system.
 
     Construct with `LabHarness.build()`. The returned instance is safe to
     cache for the lifetime of the embedder process.
     """
 
-    config: AieicConfig
+    config: SystemConfig
     participant: ParticipantAgent
     guardian: GuardianAgent
     companion: LabCompanion
@@ -66,13 +66,13 @@ class LabHarness:
     def build(
         cls,
         *,
-        config: Optional[AieicConfig] = None,
+        config: Optional[SystemConfig] = None,
         participant_store: Optional[ParticipantStore] = None,
         guardian_store: Optional[GuardianStore] = None,
         knowledge_base: Optional[KnowledgeBase] = None,
         openai_client: Optional[Any] = None,
     ) -> "LabHarness":
-        cfg = config or AieicConfig.from_env()
+        cfg = config or SystemConfig.from_env()
 
         if not cfg.llm_configured and openai_client is None:
             raise RuntimeError(
@@ -123,7 +123,7 @@ class LabHarness:
 
 
 # --------------------------------------------------------------- defaults
-def _build_default_llm(config: AieicConfig) -> Any:
+def _build_default_llm(config: SystemConfig) -> Any:
     """Build a sync `AzureOpenAI` client from config. Lazy import."""
     from openai import AzureOpenAI
 
@@ -134,7 +134,7 @@ def _build_default_llm(config: AieicConfig) -> Any:
     )
 
 
-def _build_default_kb(config: AieicConfig) -> KnowledgeBase:
+def _build_default_kb(config: SystemConfig) -> KnowledgeBase:
     if not config.search_enabled:
         return NullKB()
     return AzureSearchKB(

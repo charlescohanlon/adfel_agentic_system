@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Optional
 
-from ..config import AieicConfig
+from ..config import SystemConfig
 from ..models import (
     GuidanceLevel,
     QuestionClassification,
@@ -40,7 +40,7 @@ class GuardianAgent:
         *,
         store: GuardianStore,
         openai_client: Any,
-        config: AieicConfig,
+        config: SystemConfig,
     ) -> None:
         self._store = store
         self._llm = openai_client

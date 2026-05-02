@@ -1,5 +1,5 @@
 """
-Internal types used across the AIEIC harness.
+Internal types used across the ADFEL harness.
 
 These are deliberately small Pydantic / dataclass types used inside the
 agents and orchestrator. They're re-exported from `agentic_system` only for the

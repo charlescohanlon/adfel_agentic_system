@@ -1,8 +1,8 @@
 """
-Configuration for the AIEIC harness.
+Configuration for the harness.
 
-`AieicConfig` is a plain dataclass — no implicit env loading. Embedders
-that want env-driven config call `AieicConfig.from_env()`; embedders that
+`SystemConfig` is a plain dataclass — no implicit env loading. Embedders
+that want env-driven config call `SystemConfig.from_env()`; embedders that
 want to drive everything from their own settings system construct it
 directly.
 """
@@ -15,7 +15,7 @@ from pathlib import Path
 
 
 @dataclass(frozen=True)
-class AieicConfig:
+class SystemConfig:
     # ---- Identity ----------------------------------------------------------
     student_id: str = "default-student"
     lab_id: str = "default-lab"
@@ -61,11 +61,11 @@ class AieicConfig:
 
     # ---- Constructors ------------------------------------------------------
     @classmethod
-    def from_env(cls, **overrides) -> "AieicConfig":
+    def from_env(cls, **overrides) -> "SystemConfig":
         """Build a config from environment variables. Overrides win.
 
         Embedders that don't want env-driven config should construct
-        `AieicConfig(...)` directly instead of calling this.
+        `SystemConfig(...)` directly instead of calling this.
         """
         base = cls(
             student_id=os.getenv("STUDENT_ID", "default-student"),

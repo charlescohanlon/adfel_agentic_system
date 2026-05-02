@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-from ..config import AieicConfig
+from ..config import SystemConfig
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ def _build_system_prompt(
 
 
 class LabCompanion:
-    def __init__(self, *, openai_client: Any, config: AieicConfig) -> None:
+    def __init__(self, *, openai_client: Any, config: SystemConfig) -> None:
         self._llm = openai_client
         self._config = config
 

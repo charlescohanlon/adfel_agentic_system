@@ -1,7 +1,7 @@
 [workspace]
 authors = ["Charles O'Hanlon"]
 channels = ["conda-forge"]
-name = "aieic_agentic_system"
+name = "adfel_agentic_system"
 platforms = ["osx-64", "osx-arm64"]
 version = "0.3.0"
 

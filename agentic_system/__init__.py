@@ -1,9 +1,9 @@
 """
-AIEIC — student-facing agentic tutoring harness.
+ADFEL — student-facing agentic tutoring harness.
 
 Public API:
 
-    from agentic_system import LabHarness, AieicConfig
+    from agentic_system import LabHarness, SystemConfig
 
     harness = LabHarness.build()
     state   = harness.start_session()
@@ -15,7 +15,7 @@ Custom backends (swap SQLite for a remote API, or KB for a different
 retriever) can be injected:
 
     harness = LabHarness.build(
-        config=AieicConfig.from_env(),
+        config=SystemConfig.from_env(),
         participant_store=MyRemoteStore(...),
         guardian_store=MyRemoteStore(...),
         knowledge_base=MyKB(...),
@@ -23,7 +23,7 @@ retriever) can be injected:
 """
 
 from .api import LabHarness
-from .config import AieicConfig
+from .config import SystemConfig
 from .kb import AzureSearchKB, KnowledgeBase, NullKB, RetrievedDoc
 from .models import (
     GuidanceLevel,
@@ -43,7 +43,7 @@ from .store import (
 __all__ = [
     # facade
     "LabHarness",
-    "AieicConfig",
+    "SystemConfig",
     # types the embedder reads
     "SessionState",
     "TurnResult",
