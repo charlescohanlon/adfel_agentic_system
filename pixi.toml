@@ -1,23 +1,41 @@
 [workspace]
 authors = ["Charles O'Hanlon"]
 channels = ["conda-forge"]
-name = "x80_helper"
-platforms = ["osx-64"]
-version = "0.1.0"
+name = "aieic_agentic_system"
+platforms = ["osx-64", "osx-arm64"]
+version = "0.3.0"
 
+# ----------------------------------------------------------------------
+# Tasks — single-process Chainlit. All agents run in-process; SQLite files
+# live under ./data/.
+#
+# Required env vars (put them in .env; python-dotenv loads it at startup):
+#   AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY,
+#   AZURE_OPENAI_DEPLOYMENT_NAME, AZURE_OPENAI_API_VERSION
+#   AZURE_SEARCH_* (optional — KB disabled if blank)
+#   STUDENT_ID, LAB_ID, COURSE_ID (defaults are fine)
+# ----------------------------------------------------------------------
 [tasks]
-start = "chainlit run app.py -w"
+dev = "chainlit run app.py -w"
+start = "chainlit run app.py -h --host 0.0.0.0 --port 8000"
+reset-db = "rm -f data/participant.db data/guardian.db data/*.db-journal data/*.db-wal data/*.db-shm"
+
+[activation.env]
+# Local SQLite stores live under ./data/ (mirrors the docker-compose mount).
+PARTICIPANT_DB_PATH = "$PIXI_PROJECT_ROOT/data/participant.db"
+GUARDIAN_DB_PATH    = "$PIXI_PROJECT_ROOT/data/guardian.db"
+PYTHONPATH          = "$PIXI_PROJECT_ROOT"
 
 [dependencies]
 python = "3.12.*"
-filelock = ">=3.20.2,<4"
 
 [pypi-dependencies]
-chainlit = ">=2.9.4, <3"
-openai = ">=2.14.0, <3"
+chainlit               = ">=2.9.4, <3"
+openai                 = ">=1.40.0, <3"
 azure-search-documents = ">=11.6.0, <12"
-azure-core = ">=1.37.0, <2"
-python-dotenv = ">=1.2.1, <2"
-pandas = "*"
-openpyxl = "*"
+azure-core             = ">=1.37.0, <2"
+python-dotenv          = ">=1.0.0, <2"
+pydantic               = ">=2.0.0, <3"
+
+# Dev / notebooks
 ipykernel = "*"

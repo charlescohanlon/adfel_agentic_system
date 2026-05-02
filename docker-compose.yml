@@ -1,0 +1,23 @@
+services:
+  chainlit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY}
+      AZURE_OPENAI_DEPLOYMENT_NAME: ${AZURE_OPENAI_DEPLOYMENT_NAME}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-12-01-preview}
+      AZURE_SEARCH_ENDPOINT: ${AZURE_SEARCH_ENDPOINT}
+      AZURE_SEARCH_API_KEY: ${AZURE_SEARCH_API_KEY}
+      AZURE_SEARCH_INDEX_NAME: ${AZURE_SEARCH_INDEX_NAME}
+      STUDENT_ID: ${STUDENT_ID:-default-student}
+      LAB_ID: ${LAB_ID:-default-lab}
+      COURSE_ID: ${COURSE_ID:-CSC580}
+      PARTICIPANT_DB_PATH: /data/participant.db
+      GUARDIAN_DB_PATH: /data/guardian.db
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./data:/data
+    ports:
+      - "8000:8000"

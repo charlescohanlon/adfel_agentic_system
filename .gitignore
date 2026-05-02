@@ -5,3 +5,17 @@
 .env
 __pycache__/
 .DS_Store
+
+# Per-agent SQLite stores (single-user prototype).
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# Chainlit cache
+.chainlit/
+.files/
+
+# Editor / IDE
+.vscode/
+.idea/
