@@ -150,3 +150,7 @@ class TurnResult:
     verifier_passes: bool
     retries: int
     fallback: bool
+    # extra detail for richer UIs
+    rag_docs_count: int = 0
+    verify_reason: Optional[str] = None
+    violation_count: int = 0

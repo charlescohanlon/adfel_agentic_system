@@ -72,7 +72,16 @@ ANSWER_FARMING
 4. If the conversation history shows 3 or more questions that together are solving
    one lab problem step-by-step: classify the current question as ANSWER_FARMING
    even if in isolation it looks PROCEDURAL.
-5. When in doubt between CONCEPTUAL/PROCEDURAL and DIRECT_SOLUTION/ANSWER_FARMING,
+5. **KB match rule**: If lab material excerpts are provided and the student's question
+   is semantically asking you to solve, complete, derive, compute, or answer any specific
+   problem, task, circuit, exercise, or coding challenge that appears in those excerpts —
+   classify as DIRECT_SOLUTION. This applies even when the question is phrased as
+   "how do I...", "can you walk me through...", or "explain how to..." if the target
+   is clearly a specific graded task from the lab material.
+   Counter-examples that are NOT DIRECT_SOLUTION under this rule: asking what a concept
+   means, asking about a formula in the abstract, or asking for debugging help on code
+   the student wrote themselves.
+6. When in doubt between CONCEPTUAL/PROCEDURAL and DIRECT_SOLUTION/ANSWER_FARMING,
    prefer the non-violation classification unless the evidence is clear.
 
 ## Output Format
@@ -187,6 +196,7 @@ def classify_question(
     conversation_history: list[dict],
     session_context: dict,
     llm: LLMClient,
+    rag_context: str = "",
 ) -> ClassificationResult:
     history_text = (
         "\n".join(
@@ -197,10 +207,17 @@ def classify_question(
         else "(no prior conversation)"
     )
 
+    lab_material_block = (
+        f"\nLab material retrieved (apply KB match rule #5):\n---\n{rag_context}\n---\n"
+        if rag_context
+        else ""
+    )
+
     user_content = (
         f"Lab ID: {session_context.get('lab_id', 'unknown')}\n"
         f"Questions asked this session: {session_context.get('question_count', 0)}\n"
-        f"Violations this session: {session_context.get('violation_count', 0)}\n\n"
+        f"Violations this session: {session_context.get('violation_count', 0)}\n"
+        f"{lab_material_block}\n"
         f"Conversation history:\n{history_text}\n\n"
         f"Student's current question:\n{question_text}"
     )

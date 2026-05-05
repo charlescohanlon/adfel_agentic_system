@@ -9,7 +9,7 @@ the student.
 The repo is split in two:
 
 - **`agentic_system/`** — a UI-agnostic Python package that owns all the agents,
-  policy, storage, and retrieval logic. It exposes a single facade,
+  policy, storage, retrieval, and LLM integration. It exposes a single facade,
   `LabHarness`, and knows nothing about the web framework hosting it.
 - **`app.py`** — a thin [Chainlit](https://chainlit.io) shell that wires the
   harness into a chat UI. It is the *only* place Chainlit is imported;
@@ -24,12 +24,14 @@ Every student turn runs through this pipeline (`agentic_system/orchestrator.py`)
 question
     │
     ▼
+KnowledgeBase.search ──► RAG context (Azure AI Search; optional)
+    │                    runs first so the classifier can see what lab
+    │                    material the question semantically targets
+    │
+    ▼
 Guardian.validate ──► classify (CONCEPTUAL / PROCEDURAL / DIRECT_SOLUTION / …)
     │                 derive guidance level (FULL / MODERATE / MINIMAL / REJECTED)
     │                 escalate session after 3 violations
-    │
-    ▼
-KnowledgeBase.search ──► RAG context (Azure AI Search; optional)
     │
     ▼
 LabCompanion.respond ──► draft (constrained by guidance level)
@@ -50,7 +52,7 @@ response to student
 | Agent | Role | Backed by |
 |---|---|---|
 | **Lab Companion** | The only student-facing agent. Generates hint-style responses constrained by the per-turn guidance level. | `LLMClient` |
-| **Guardian** | Two gates: input classification (academic-integrity policy) and output verification (does the draft give away the answer?). Tracks violations and escalates the session at the 3rd violation. | `LLMClient` + SQLite (`guardian.db`) |
+| **Guardian** | Two gates: input classification (academic-integrity policy, with KB match awareness) and output verification (does the draft give away the answer?). Tracks violations and escalates the session at the 3rd violation. | `LLMClient` + SQLite (`guardian.db`) |
 | **Participant** | Learning-context tracker. Classifies each question's type/hint-level/difficulty and builds a narrative summary of the student's history that the Lab Companion uses as context. | `LLMClient` + SQLite (`participant.db`) |
 
 The model is reached only through the `LLMClient` protocol
@@ -66,7 +68,8 @@ the `llm/` package imports a vendor SDK.
 
 ### Public API
 
-The embedder (`app.py` today; anything else tomorrow) only needs the `LabHarness` facade:
+The embedder (`app.py` today; anything else tomorrow) only needs the
+`LabHarness` facade:
 
 ```python
 from agentic_system import LabHarness
@@ -78,17 +81,22 @@ print(result.response)
 harness.end_session(state)
 ```
 
+`handle_turn` accepts an optional `on_step` callback that receives
+`(name, type, output)` triples for each pipeline stage — used by the
+Chainlit shell to render live "Steps" in the UI. Embedders that don't
+care about progress events can omit it.
+
 To swap backends (custom KB, remote-API store, a different LLM):
 
 ```python
-from agentic_system import LabHarness, ClaudeLLM
+from agentic_system import LabHarness, ClaudeLLM, SystemConfig
 
 # Use Claude via the Anthropic SDK (reads ANTHROPIC_API_KEY by default):
 harness = LabHarness.build(llm=ClaudeLLM())
 
 # Or compose multiple swaps:
 harness = LabHarness.build(
-    config=SystemConfig(...),
+    config=SystemConfig.from_env(),
     participant_store=MyRemoteStore(...),
     guardian_store=MyRemoteStore(...),
     knowledge_base=MyKB(...),
@@ -121,7 +129,7 @@ adfel_agentic_system/
 │   ├── __init__.py              Public re-exports
 │   ├── api.py                   LabHarness facade — single public entry point
 │   ├── config.py                SystemConfig dataclass + from_env()
-│   ├── orchestrator.py          Per-turn pipeline (validate → RAG → draft → verify)
+│   ├── orchestrator.py          Per-turn pipeline (RAG → validate → draft → verify)
 │   ├── models.py                Enums, Pydantic records, result dataclasses
 │   ├── agents/
 │   │   ├── lab_companion.py     Student-facing hint generator
@@ -136,7 +144,7 @@ adfel_agentic_system/
 │   │   └── claude.py            ClaudeLLM (the only file that imports `anthropic`)
 │   ├── kb/
 │   │   ├── base.py              KnowledgeBase Protocol + RetrievedDoc + format_context
-│   │   ├── azure_search.py      AzureSearchKB (lazy-imports the SDK)
+│   │   ├── azure_search.py      AzureSearchKB (lazy-imports the Azure SDK)
 │   │   └── null.py              NullKB — used when search is unconfigured
 │   └── store/
 │       ├── base.py              ParticipantStore + GuardianStore Protocols
@@ -174,8 +182,8 @@ pixi run start      # production-style: chainlit run -h --host 0.0.0.0 --port 80
 pixi run reset-db   # nuke local SQLite stores under data/
 ```
 
-`pixi.toml` sets `PARTICIPANT_DB_PATH` and `GUARDIAN_DB_PATH` to absolute paths
-under `data/` automatically when the env activates.
+`pixi.toml` sets `PARTICIPANT_DB_PATH` and `GUARDIAN_DB_PATH` to absolute
+paths under `data/` automatically when the env activates.
 
 ### Running with Docker
 
@@ -193,9 +201,9 @@ or in `app.py`. The agents themselves never touch `os.environ`.
 
 | Variable | Required? | Notes |
 |---|---|---|
-| `AZURE_OPENAI_ENDPOINT` | yes | Used by all three agents. |
-| `AZURE_OPENAI_API_KEY` | yes | |
-| `AZURE_OPENAI_DEPLOYMENT_NAME` | yes | The chat-model deployment (e.g. `gpt-4o`). |
+| `AZURE_OPENAI_ENDPOINT` | yes¹ | Used by all three agents. |
+| `AZURE_OPENAI_API_KEY` | yes¹ | |
+| `AZURE_OPENAI_DEPLOYMENT_NAME` | yes¹ | The chat-model deployment (e.g. `gpt-4o`). |
 | `AZURE_OPENAI_API_VERSION` | no | Defaults to `2024-12-01-preview`. |
 | `AZURE_SEARCH_ENDPOINT` | no | Leave the three `AZURE_SEARCH_*` blank to disable RAG (the harness falls back to `NullKB`). |
 | `AZURE_SEARCH_API_KEY` | no | |
@@ -209,7 +217,11 @@ or in `app.py`. The agents themselves never touch `os.environ`.
 | `RAG_MAX_CONTENT_LENGTH` | no | Per-doc truncation in the prompt. Default `1000`. |
 | `HISTORY_KEEP_TURNS` | no | Conversation history window passed to the Lab Companion. Default `6`. |
 | `VERIFIER_MAX_RETRIES` | no | Retries when Guardian rejects a draft. Default `2`. |
-| `LOG_LEVEL` | no | `INFO` by default. Set `DEBUG` to see classifications/retries inline in the UI. |
+| `LOG_LEVEL` | no | `INFO` by default. Set `DEBUG` to see classifications/retries inline. |
+
+¹ Only required if you don't inject your own `LLMClient` into
+`LabHarness.build(llm=...)`. Using `ClaudeLLM` instead requires
+`ANTHROPIC_API_KEY` (or an explicit `api_key=` / `auth_token=`).
 
 ## Policy at a glance
 
@@ -221,6 +233,11 @@ behavior is auditable in one place.
 - `DIRECT_SOLUTION` — hard rejection.
 - `ANSWER_FARMING` — incremental extraction across turns; allowed but throttled.
 
+The classifier sees the retrieved KB chunks alongside the question, so a
+question that semantically targets a specific lab task surfaced by the
+KB is classified as `DIRECT_SOLUTION` even when phrased as "how do
+I…" or "walk me through…".
+
 **Guidance levels** (what shape the Lab Companion's response takes):
 - `FULL` — normal hint-style tutoring.
 - `MODERATE` — nudge harder toward independence; shorter answers.
@@ -229,13 +246,15 @@ behavior is auditable in one place.
 
 **Throttling rules** (`derive_guidance_level`):
 - 3 violations in a session → escalate; all subsequent turns rejected.
-- Q12+ → at least `MODERATE`. Q14+ → `MINIMAL`. Q16+ → `REJECTED`.
+- Q12+ (or any prior violation) → at least `MODERATE`. Q14+ → `MINIMAL`.
+  Q16+ → `REJECTED`.
 - Any `DIRECT_SOLUTION` classification → `REJECTED` for that turn.
 - Any `ANSWER_FARMING` classification → `MINIMAL` for that turn.
 
 **Failure modes** are all fail-safe: a classifier error defaults to
 `PROCEDURAL` / `MODERATE`; a verifier error passes the draft through; a
-companion error returns a polite "please rephrase" message.
+KB error proceeds with empty context; a companion error returns a polite
+"please rephrase" message.
 
 ## Azure deployment
 

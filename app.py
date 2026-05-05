@@ -9,7 +9,7 @@ changes inside the `agentic_system` package.
 Public API used:
     LabHarness.build()
     harness.start_session()  -> SessionState
-    harness.handle_turn(state, question) -> TurnResult
+    harness.handle_turn(state, question, on_step=...) -> TurnResult
     harness.end_session(state)
 """
 
@@ -46,6 +46,8 @@ def _get_harness() -> LabHarness:
     return _harness
 
 
+# ------------------------------------------------------------------ callbacks
+
 @cl.on_chat_start
 async def on_start() -> None:
     harness = _get_harness()
@@ -54,7 +56,7 @@ async def on_start() -> None:
 
     intro = (
         "Welcome to the CSC 580 Lab Companion. I'll help you work through "
-        "your assignments by giving hints — not answers. Ask me about the "
+        "your assignments by giving hints, not answers. Ask me about the "
         "lab manual, concepts you want to understand, or errors you're "
         "running into."
     )
@@ -74,26 +76,42 @@ async def on_message(message: cl.Message) -> None:
         state = await asyncio.to_thread(harness.start_session)
         cl.user_session.set("session_state", state)
 
-    msg = await cl.Message(content="").send()
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
 
+    def step_callback(name: str, step_type: str, output: str) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, (name, step_type, output))
+
+    async def consume_steps() -> None:
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            name, step_type, output = item
+            async with cl.Step(name=name, type=step_type) as step:
+                step.output = output
+
+    async def run_pipeline():
+        try:
+            return await asyncio.to_thread(
+                harness.handle_turn, state, message.content, on_step=step_callback
+            )
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
+
+    consumer = asyncio.create_task(consume_steps())
     try:
-        result = await asyncio.to_thread(harness.handle_turn, state, message.content)
+        result = await run_pipeline()
     except Exception:
         logger.exception("handle_turn failed")
-        msg.content = "Sorry — something went wrong on my side. Please try again."
-        await msg.update()
+        consumer.cancel()
+        await cl.Message(
+            content="Sorry — something went wrong on my side. Please try again."
+        ).send()
         return
 
-    msg.content = result.response
-
-    if logger.isEnabledFor(logging.DEBUG):
-        msg.content += (
-            f"\n\n---\n*debug: classification={result.classification} "
-            f"guidance={result.guidance_level} retries={result.retries} "
-            f"verifier_passes={result.verifier_passes} "
-            f"fallback={result.fallback}*"
-        )
-    await msg.update()
+    await consumer
+    await cl.Message(content=result.response).send()
 
 
 @cl.on_chat_end

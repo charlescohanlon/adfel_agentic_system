@@ -3,10 +3,12 @@ Internal pipeline orchestrator. Not part of the public API — the
 embedder uses `agentic_system.LabHarness` instead, which composes this.
 
 Per-turn order:
-  1. Guardian.validate(question, history) -> guidance_level.
+  1. KB.search(question) → rag_docs + rag_context.
+  2. Guardian.validate(question, history, rag_docs) -> guidance_level.
+     - classifier receives KB docs so it can apply the KB match rule
+       (question semantically targets a lab assignment → DIRECT_SOLUTION).
      - if session_escalated and REJECTED → render escalation; end turn.
      - if guidance_level == REJECTED → render policy refusal; end turn.
-  2. KB.search(question) → rag_context.
   3. LabCompanion.respond(...) → draft.
   4. Guardian.verify(question, draft, guidance_level) → {passes, feedback}.
      - if !passes: re-call respond() with feedback. Up to N retries.
@@ -19,7 +21,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from typing import Optional
+from typing import Callable, Optional
 
 from .agents import GuardianAgent, LabCompanion, ParticipantAgent
 from .agents.lab_companion import SAFE_FALLBACK
@@ -78,10 +80,37 @@ class Orchestrator:
         logger.info("Session ended: %s", state.session_id)
 
     # -------------------------------------------------------- per-turn
-    def handle_turn(self, state: SessionState, question: str) -> TurnResult:
+    def handle_turn(
+        self,
+        state: SessionState,
+        question: str,
+        *,
+        on_step: Optional[Callable[[str, str, str], None]] = None,
+    ) -> TurnResult:
         t0 = time.perf_counter()
 
-        # 1. Validate.
+        # 1. RAG — run before validation so docs inform classification.
+        rag_docs: list = []
+        try:
+            rag_docs = self._kb.search(question, top=self._config.rag_top_n)
+            rag_context = format_context(
+                rag_docs,
+                max_content_chars=self._config.rag_max_content_chars,
+            )
+        except Exception as e:
+            logger.warning("KB.search failed; proceeding without context: %s", e)
+            rag_context = format_context([])
+
+        if on_step and self._config.search_enabled:
+            n = len(rag_docs)
+            on_step(
+                "Knowledge Base · Context Retrieval",
+                "retrieval",
+                f"Retrieved **{n}** document{'s' if n != 1 else ''}."
+                if n else "No matches found.",
+            )
+
+        # 2. Validate — passes rag_docs so classifier can apply the KB match rule.
         try:
             validation = self._guardian.validate(
                 student_id=self._config.student_id,
@@ -89,15 +118,19 @@ class Orchestrator:
                 lab_id=self._config.lab_id,
                 question_text=question,
                 conversation_history=state.conversation_history,
+                rag_docs=rag_docs,
             )
         except Exception as e:
             logger.error("Guardian.validate failed (fail-safe MODERATE): %s", e)
             validation = self._fail_safe_validation()
 
-        # 2. Hard short-circuits.
+        if on_step:
+            on_step("Guardian · Input Validation", "tool", _fmt_validate(validation))
+
+        # 3. Hard short-circuits.
         if validation.session_escalated and validation.guidance_level == GuidanceLevel.REJECTED:
             return self._refusal_turn(
-                state, question, t0, validation,
+                state, question, t0, validation, on_step=on_step,
                 response=(
                     "I've noticed multiple integrity-flagged questions this session, so "
                     "I won't keep answering. Please review the lab manual, attempt the "
@@ -108,7 +141,7 @@ class Orchestrator:
 
         if validation.guidance_level == GuidanceLevel.REJECTED:
             return self._refusal_turn(
-                state, question, t0, validation,
+                state, question, t0, validation, on_step=on_step,
                 response=(
                     "That looks like a request for a direct solution to your "
                     "assignment. I can help you think through the underlying concept "
@@ -118,27 +151,21 @@ class Orchestrator:
                 escalated=False,
             )
 
-        # 3. RAG.
-        try:
-            rag_context = format_context(
-                self._kb.search(question, top=self._config.rag_top_n),
-                max_content_chars=self._config.rag_max_content_chars,
-            )
-        except Exception as e:
-            logger.warning("KB.search failed; proceeding without context: %s", e)
-            rag_context = format_context([])
-
         # 4. Draft → verify → retry loop.
         draft, verifier, retries, fallback = self._draft_and_verify(
             state=state,
             question=question,
             validation=validation,
             rag_context=rag_context,
+            on_step=on_step,
         )
 
         # 5. Log + record.
         self._log_turn(state, question, t0)
         self._record_turn(state, question, draft)
+
+        if on_step:
+            on_step("Participant · Interaction Logged", "tool", "Interaction recorded to participant store.")
 
         return TurnResult(
             response=draft,
@@ -149,6 +176,9 @@ class Orchestrator:
             verifier_passes=verifier.passes,
             retries=retries,
             fallback=fallback,
+            rag_docs_count=len(rag_docs),
+            verify_reason=verifier.reason,
+            violation_count=validation.violation_count,
         )
 
     # -------------------------------------------------------- helpers
@@ -159,9 +189,12 @@ class Orchestrator:
         t0: float,
         validation: ValidateResult,
         *,
+        on_step: Optional[Callable[[str, str, str], None]],
         response: str,
         escalated: bool,
     ) -> TurnResult:
+        if on_step:
+            on_step("Participant · Interaction Logged", "tool", "Interaction recorded to participant store.")
         self._log_turn(state, question, t0)
         self._record_turn(state, question, response)
         return TurnResult(
@@ -173,6 +206,7 @@ class Orchestrator:
             verifier_passes=True,
             retries=0,
             fallback=False,
+            violation_count=validation.violation_count,
         )
 
     def _draft_and_verify(
@@ -182,6 +216,7 @@ class Orchestrator:
         question: str,
         validation: ValidateResult,
         rag_context: str,
+        on_step: Optional[Callable[[str, str, str], None]] = None,
     ) -> tuple[str, VerifyResult, int, bool]:
         last_feedback: Optional[str] = None
         last_verify = VerifyResult(passes=True, reason=None, feedback_for_companion=None)
@@ -220,9 +255,25 @@ class Orchestrator:
             except Exception as e:
                 # Per plan: verifier failures fail open — pass the draft.
                 logger.warning("Guardian.verify failed (fail-safe pass): %s", e)
-                return draft, VerifyResult(passes=True, reason="verifier-error", feedback_for_companion=None), attempt, False
+                verify = VerifyResult(passes=True, reason="verifier-error", feedback_for_companion=None)
+                if on_step:
+                    label = f"attempt {attempt + 1}" if attempt > 0 else "first attempt"
+                    on_step("Lab Companion · Response Generation", "llm", f"Draft generated ({label}).")
+                    on_step("Guardian · Output Verification", "tool", "✅ Passed (verifier error — fail-open).")
+                return draft, verify, attempt, False
 
             last_verify = verify
+
+            if on_step:
+                label = f"attempt {attempt + 1}" if attempt > 0 else "first attempt"
+                on_step("Lab Companion · Response Generation", "llm", f"Draft generated ({label}).")
+                verify_out = (
+                    "✅ Response passed output verification."
+                    if verify.passes
+                    else f"Draft rejected — _{verify.reason or 'no reason given'}_ — retrying."
+                )
+                on_step("Guardian · Output Verification", "tool", verify_out)
+
             if verify.passes:
                 return draft, verify, attempt, False
 
@@ -267,3 +318,24 @@ class Orchestrator:
     def _record_turn(state: SessionState, question: str, response: str) -> None:
         state.conversation_history.append({"role": "user", "content": question})
         state.conversation_history.append({"role": "assistant", "content": response})
+
+
+_GUIDANCE_EMOJI = {"FULL": "🟢", "MODERATE": "🟡", "MINIMAL": "🟠", "REJECTED": "🔴"}
+_CLASS_LABEL = {
+    "CONCEPTUAL": "Conceptual", "PROCEDURAL": "Procedural",
+    "CLARIFICATION": "Clarification", "DIRECT_SOLUTION": "Direct Solution",
+    "ANSWER_FARMING": "Answer Farming",
+}
+
+
+def _fmt_validate(v: ValidateResult) -> str:
+    emoji = _GUIDANCE_EMOJI.get(v.guidance_level.value, "⚪")
+    cls = _CLASS_LABEL.get(v.classification.value, v.classification.value)
+    lines = [
+        f"**Classification:** {cls}",
+        f"**Guidance level:** {emoji} {v.guidance_level.value}",
+        f"**{'Violation detected' if v.violation_detected else 'No violation'}** — session total: {v.violation_count}",
+    ]
+    if v.session_escalated:
+        lines.append("⛔ **Session escalated** — integrity threshold reached")
+    return "\n".join(lines)

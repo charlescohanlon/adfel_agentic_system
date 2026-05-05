@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Optional
 
 from ..config import SystemConfig
+from ..kb import RetrievedDoc, format_context
 from ..llm import LLMClient
 from ..models import (
     GuidanceLevel,
@@ -116,6 +117,7 @@ class GuardianAgent:
         lab_id: str,
         question_text: str,
         conversation_history: list[dict],
+        rag_docs: list[RetrievedDoc] | None = None,
     ) -> ValidateResult:
         session = self._store.get_session(session_id, student_id)
         if session is None:
@@ -127,6 +129,8 @@ class GuardianAgent:
         violation_count = session.get("violation_count", 0)
         session_escalated = bool(session.get("escalated", False))
 
+        rag_context = format_context(rag_docs or [], max_content_chars=800)
+
         try:
             llm_result: ClassificationResult = classify_question(
                 question_text=question_text,
@@ -137,6 +141,7 @@ class GuardianAgent:
                     "violation_count": violation_count,
                 },
                 llm=self._llm,
+                rag_context=rag_context if rag_docs else "",
             )
         except Exception as e:
             logger.error("Classifier error (fail-safe applied): %s", e, exc_info=True)

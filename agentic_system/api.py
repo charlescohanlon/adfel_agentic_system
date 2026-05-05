@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 from .agents import GuardianAgent, LabCompanion, ParticipantAgent
 from .config import SystemConfig
@@ -119,8 +119,14 @@ class LabHarness:
     def start_session(self) -> SessionState:
         return self._orchestrator.start_session()
 
-    def handle_turn(self, state: SessionState, question: str) -> TurnResult:
-        return self._orchestrator.handle_turn(state, question)
+    def handle_turn(
+        self,
+        state: SessionState,
+        question: str,
+        *,
+        on_step: Optional[Callable[[str, str, str], None]] = None,
+    ) -> TurnResult:
+        return self._orchestrator.handle_turn(state, question, on_step=on_step)
 
     def end_session(self, state: SessionState) -> None:
         self._orchestrator.end_session(state)
