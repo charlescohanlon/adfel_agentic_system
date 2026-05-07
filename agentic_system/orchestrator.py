@@ -19,6 +19,7 @@ Per-turn order:
 from __future__ import annotations
 
 import logging
+import os
 import time
 import uuid
 from typing import Callable, Optional
@@ -102,12 +103,10 @@ class Orchestrator:
             rag_context = format_context([])
 
         if on_step and self._config.search_enabled:
-            n = len(rag_docs)
             on_step(
                 "Knowledge Base · Context Retrieval",
                 "retrieval",
-                f"Retrieved **{n}** document{'s' if n != 1 else ''}."
-                if n else "No matches found.",
+                _fmt_rag_sources(rag_docs),
             )
 
         # 2. Validate — passes rag_docs so classifier can apply the KB match rule.
@@ -326,6 +325,18 @@ _CLASS_LABEL = {
     "CLARIFICATION": "Clarification", "DIRECT_SOLUTION": "Direct Solution",
     "ANSWER_FARMING": "Answer Farming",
 }
+
+
+def _beautify_source(source: str) -> str:
+    return os.path.splitext(source)[0].replace("_", " ").title()
+
+
+def _fmt_rag_sources(rag_docs: list) -> str:
+    if not rag_docs:
+        return "No matches found."
+    sources = sorted({_beautify_source(d.source) for d in rag_docs})
+    bullets = "\n".join(f"- {s}" for s in sources)
+    return f"Retrieved **{len(sources)}** source{'s' if len(sources) != 1 else ''}:\n{bullets}"
 
 
 def _fmt_validate(v: ValidateResult) -> str:
