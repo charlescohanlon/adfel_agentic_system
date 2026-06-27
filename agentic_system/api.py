@@ -116,8 +116,8 @@ class LabHarness:
         )
 
     # -------------------------------------------------------- public API
-    def start_session(self) -> SessionState:
-        return self._orchestrator.start_session()
+    def start_session(self, *, student_id: Optional[str] = None) -> SessionState:
+        return self._orchestrator.start_session(student_id=student_id)
 
     def handle_turn(
         self,

@@ -8,28 +8,56 @@ ADFEL is a hint-style tutoring assistant for Cal Poly's CSC 580 lab course.
 Three agents collaborate per turn — a **Lab Companion** generates the
 response, a **Guardian** classifies the question and verifies the draft for
 academic-integrity violations, and a **Participant** logs the interaction
-and tracks the student's learning context. All of that lives in the
-`agentic_system/` Python package, which is *deliberately* decoupled from
-any UI. `app.py` is a thin Chainlit shell that consumes the package's
-public facade (`LabHarness`).
+and tracks the student's learning context.
+
+The system runs as two processes:
+
+- **Server** (`server/`) — a FastAPI app that hosts `LabHarness` and all
+  agent logic. Owns session state, LLM clients, and persistent stores
+  (SQLite — persists to `./data/` locally; in Azure it lives on the
+  server container's **ephemeral storage**, because SMB locking on Azure
+  Files is incompatible with SQLite — see the `journal_mode` dance in
+  `agentic_system/store/sqlite.py`). Also serves the instructor
+  file-upload and indexer-status endpoints.
+- **Client** (`app.py`) — a thin Chainlit shell that forwards every turn
+  to the server over HTTP and renders streamed step-progress events via
+  SSE. Holds only a `session_id` per user; imports nothing from
+  `agentic_system/`.
+
+`agentic_system/` is the core package — deliberately decoupled from both
+the UI and the server framework.
 
 ## Common commands
 
 The project uses [pixi](https://pixi.sh/) for environment management; pixi
 sets `PARTICIPANT_DB_PATH` / `GUARDIAN_DB_PATH` to absolute paths under
-`./data/` automatically. Required env (in `.env`, loaded by `python-dotenv`
-in `app.py`): `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`,
+`./data/` automatically. Required env (in `.env`, loaded by `python-dotenv`):
+`AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_KEY`,
 `AZURE_OPENAI_DEPLOYMENT_NAME`. `AZURE_SEARCH_*` is optional — leave the
-three vars blank to disable RAG (the harness falls back to `NullKB`).
+three vars blank to disable RAG. The client needs
+`ADFEL_SERVER_URL` (defaults to `http://localhost:8080`).
 
 ```bash
 pixi install
-pixi run dev          # chainlit run app.py -w (auto-reload, http://localhost:8000)
-pixi run start        # chainlit run app.py -h --host 0.0.0.0 --port 8000
-pixi run reset-db     # nuke local SQLite stores under data/
 
-docker compose up --build   # containerized run; ./data is mounted to /data
+# Local dev — run server and client in separate terminals:
+pixi run dev-server     # uvicorn server.main:app --reload --port 8080
+pixi run dev-client     # chainlit run app.py -w (http://localhost:8000)
+
+# Production:
+pixi run start-server   # uvicorn ... --host 0.0.0.0 --port 8080
+pixi run start-client   # chainlit run app.py -h --host 0.0.0.0 --port 8000
+
+pixi run reset-db       # nuke local SQLite stores under data/
+
+docker compose up --build   # containerized: server + client; ./data mounted
 ```
+
+The server image builds from `Dockerfile.server` + `requirements-server.txt`;
+the client image builds from `Dockerfile` + `requirements-client.txt`. Keep
+both `requirements-*.txt` files in sync with `pixi.toml`'s
+`[pypi-dependencies]` when adding deps — pixi is the source of truth for
+local dev, but the containers don't use it.
 
 `reset-db` is essential when iterating on policy/escalation behavior — the
 3-violation escalation is *persisted* per session and `STUDENT_ID` defaults
@@ -58,9 +86,9 @@ that came out of those refactors is the contract; please preserve it.
    `GuardianStore`, `KnowledgeBase`, and `LLMClient` are all duck-typed.
    The default implementations (`SqliteParticipantStore`,
    `SqliteGuardianStore`, `AzureSearchKB`, `NullKB`, `AzureOpenAILLM`)
-   live next to the protocol definition. New backends should be new files
-   implementing the same Protocol — don't widen the protocol to fit a
-   backend.
+   live next to the protocol definition. New backends
+   should be new files implementing the same Protocol — don't widen the
+   protocol to fit a backend.
 
    **Vendor SDKs are contained per-file.** Only
    `agentic_system/llm/azure_openai.py` may import the `openai` SDK; only
@@ -119,24 +147,104 @@ that came out of those refactors is the contract; please preserve it.
 5. **`Participant.log_interaction`** (best-effort).
 6. Append `(user, assistant)` pair to `state.conversation_history`.
 
-`SessionState` is the opaque object the embedder holds across turns. It
+`SessionState` is the opaque object the server holds across turns. It
 carries the session id, the prefetched `StudentContext`, and the running
-conversation history. The harness gives it back to the embedder at
-`start_session()` and expects it back on every `handle_turn()`.
+conversation history. The server's in-memory `SessionRegistry` stores
+these keyed by `session_id` with a 1-hour idle TTL; a 5-minute
+background sweep (`run_ttl_sweep`, started in the FastAPI lifespan)
+evicts stale entries. The Chainlit client never sees the full object.
 
 `handle_turn` accepts an optional `on_step: Callable[[name, type, output], None]`
-for streaming progress events to the UI (used by Chainlit for the four
-visible Steps: KB retrieval, Guardian validate, Lab Companion draft,
-Guardian verify, Participant log). The callback fires from the worker
-thread; `app.py` marshals events back to the event loop via a queue.
+for streaming progress events to the UI (used by the server to emit SSE
+`step` events that the Chainlit client renders as live Steps). The callback
+fires from the worker thread; `server/routes/student.py` marshals events
+via an `asyncio.Queue` into the SSE stream.
 
 ## Code map
 
 ```
-app.py                              Chainlit shell. on_chat_start /
-                                    on_message / on_chat_end. Module-level
-                                    _harness singleton; per-user
-                                    SessionState in cl.user_session.
+app.py                              Chainlit client shell. Thin HTTP/SSE
+                                    proxy to the server. Holds a session_id
+                                    + the CAS session token per user. No
+                                    agentic_system imports. Drives the CAS
+                                    browser flow: mounts /login/cas[/callback]
+                                    on chainlit.server.app, validates the
+                                    ticket via the server, sets an HttpOnly
+                                    cookie, and reads it back in
+                                    header_auth_callback; attaches the JWT as
+                                    a per-request Bearer. Reads ADFEL_SERVER_URL,
+                                    CAS_BASE_URL, CAS_SERVICE_URL, CAS_MOCK,
+                                    ADFEL_COOKIE_SECURE, CHAINLIT_AUTH_SECRET
+                                    directly. The "no env reads outside
+                                    config.py" rule applies inside the
+                                    agentic_system/ package; app.py is
+                                    the embedder boundary.
+
+server/
+  main.py                           FastAPI app. Lifespan opens the system
+                                    DB, runs migration.bootstrap, builds
+                                    HarnessRegistry + SessionRegistry, and
+                                    attaches config + system_store +
+                                    harnesses + sessions to app.state.
+                                    No single global LabHarness anymore.
+  schemas.py                        Pydantic request/response models for
+                                    the HTTP API (turn IO + admin/course
+                                    CRUD).
+  session_store.py                  In-memory SessionRegistry with TTL
+                                    sweep for stale sessions.
+  harness_registry.py               Lazy course_id → LabHarness cache.
+                                    Builds each entry with per-course
+                                    paths/index/container via
+                                    dataclasses.replace(base_config, ...).
+  auth.py                           Session-JWT verification (require_user
+                                    builds AuthedUser from the token claims,
+                                    no per-request DB load) and role/enrollment
+                                    FastAPI dependencies (require_admin,
+                                    require_instructor, require_course_member,
+                                    require_course_instructor). Also owns the
+                                    Cal Poly CAS back-channel (validate_cas_ticket,
+                                    with a cas_mock short-circuit), the
+                                    provider-neutral resolve_or_create_user
+                                    (anchor: sso_subject), and mint/verify of
+                                    the session JWT. Lazy-imports jwt + httpx.
+                                    Honors ADFEL_DEV_AUTH_BYPASS.
+  routes/auth.py                    POST /api/v1/auth/cas/validate — the only
+                                    auth-free route. Validates a CAS ticket,
+                                    resolves/creates the user, returns a
+                                    session JWT for the client to carry.
+  provisioning.py                   Per-course blob container create/delete
+                                    and local data/courses/{id}/ cleanup.
+                                    Lazy-imports azure.storage.blob.
+  migration.py                      Idempotent startup bootstrap: seed
+                                    admin user and a "default" course
+                                    pointed at legacy SQLite paths so the
+                                    un-prefixed routes keep working.
+  indexing.py                       Blob upload + Azure AI Search indexer
+                                    trigger/status. The only file in
+                                    server/ besides provisioning.py that
+                                    imports azure.storage.blob.
+  routes/
+    student.py                      POST   /api/v1/courses/{cid}/sessions,
+                                    POST   /api/v1/courses/{cid}/sessions/{sid}/turn,
+                                    DELETE /api/v1/courses/{cid}/sessions/{sid}.
+                                    Legacy un-prefixed routes preserved,
+                                    resolving to the default course.
+                                    Session ownership enforced by
+                                    comparing state.student_id to the
+                                    authed user.id.
+    instructor.py                   POST /api/v1/courses/{cid}/instructor/upload
+                                    GET  /api/v1/courses/{cid}/instructor/indexer/status
+                                    plus legacy un-prefixed mirrors.
+                                    Uses the per-course harness's config
+                                    so each upload lands in that course's
+                                    blob container.
+    admin.py                        /api/v1/admin/users (admin),
+                                    /api/v1/admin/courses (instructor),
+                                    /api/v1/admin/courses/{cid}/enroll +
+                                    enrollments (course instructor).
+                                    Course creation auto-provisions the
+                                    blob container; search resources must
+                                    be pre-provisioned externally.
 
 agentic_system/
   api.py                            LabHarness.build() — wires defaults
@@ -144,8 +252,16 @@ agentic_system/
                                     of stores, KB, and llm (LLMClient).
                                     handle_turn(state, q, on_step=) is
                                     the main entry point.
-  config.py                         SystemConfig dataclass. .from_env() is
-                                    the only env-aware constructor.
+  config.py                         SystemConfig dataclass. .from_env()
+                                    is the only env-aware constructor.
+                                    Carries Azure OpenAI, Azure Search,
+                                    and Azure Blob/indexer fields plus
+                                    tutoring knobs. Use the derived
+                                    properties (.llm_configured,
+                                    .search_enabled, .indexing_enabled)
+                                    for feature gates instead of
+                                    re-deriving the underlying env
+                                    conditions.
   orchestrator.py                   The pipeline. RAG → validate → draft
                                     → verify → log. Read this first when
                                     debugging behavior.
@@ -206,13 +322,53 @@ agentic_system/
                                     AZURE_SEARCH_* env vars are blank.
 
   store/
-    base.py                         ParticipantStore + GuardianStore
-                                    Protocols. Sync API. dict in / dict
-                                    out (no Pydantic across the protocol
-                                    boundary).
-    sqlite.py                       Default impls. Per-agent DB file.
+    base.py                         ParticipantStore + GuardianStore +
+                                    SystemStore Protocols. Sync API. dict
+                                    in / dict out (no Pydantic across the
+                                    protocol boundary).
+    sqlite.py                       Default per-course impls. One file
+                                    each for participant + guardian.
                                     Schemas declared at the top.
+    system.py                       SqliteSystemStore — multi-tenant
+                                    metadata (users, courses,
+                                    enrollments). Used by the server,
+                                    NOT injected into LabHarness.
 ```
+
+## Multi-tenancy
+
+The server is multi-tenant. The agentic_system package is still
+single-course at the LabHarness level — multi-tenancy lives one layer up
+in `server/harness_registry.py`, which keeps one `LabHarness` per
+`course_id` and derives each one from a base `SystemConfig` via
+`dataclasses.replace`. Per-course state:
+
+- SQLite stores at `data/courses/{course_id}/{participant,guardian}.db`
+  (the legacy default course keeps `data/{participant,guardian}.db` via
+  the `participant_db_path` / `guardian_db_path` columns on `courses`).
+- Azure Blob container named `course-{uuid_short}` (auto-created at
+  course creation).
+- Azure AI Search index/indexer/datasource named on the course row;
+  these are pre-provisioned externally (Bicep / ARM / portal), NOT
+  auto-created.
+
+User identity comes from Cal Poly **CAS** SSO. The Chainlit client drives
+the browser redirect; the server validates the service ticket back-channel
+(`server/auth.py:validate_cas_ticket`) and mints a session JWT the client
+carries as `Authorization: Bearer`. `require_user` verifies that JWT and
+builds the `AuthedUser` from its claims. The identity anchor on the `users`
+table is the provider-neutral `sso_subject` (the CAS netid), nullable so
+instructors can pre-enroll students by email and have the netid late-bind on
+first login. The authed `user.id` is threaded into `SessionState.student_id`
+at session start and read by the orchestrator on every turn — there's no
+process-wide `STUDENT_ID` anymore. Course-scoped routes enforce enrollment
+via `require_course_member`. For local dev without a live Cal Poly IdP, set
+`CAS_MOCK=1` (server + client) to run the full flow against a fixed netid.
+
+The legacy un-prefixed routes (`/api/v1/sessions`, `/api/v1/instructor/*`)
+are preserved and resolve to the "default course" created on first boot
+by `server/migration.py`, so the existing Chainlit client keeps working
+while the client-side `?course=` wiring is added.
 
 ## Policy at a glance
 
@@ -244,8 +400,9 @@ The Lab Companion's tone-by-guidance-level table is in
 - **Result types are dataclasses; persistence rows are dicts.** Pydantic
   `*Record` models exist for inserts but are immediately `.model_dump()`-ed
   before crossing the store boundary so the protocol stays JSON-shaped.
-- **All store/agent methods are sync.** The embedder offloads to a thread
-  (`asyncio.to_thread` in `app.py`) when it cares about an event loop.
+- **All store/agent methods are sync.** The server offloads to a thread
+  (`asyncio.to_thread` in `server/routes/student.py`) for the async
+  FastAPI endpoints.
 - **Logging, not print.** `logging.getLogger(__name__)` at the top of
   every module. The embedder configures handlers; the package never does.
 - **Lazy-import heavy SDKs.** Follow the pattern in `kb/azure_search.py`

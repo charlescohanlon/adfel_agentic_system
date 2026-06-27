@@ -50,8 +50,18 @@ class SqliteParticipantStore:
     # ----------------------------------------------------------- lifecycle
     def init(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self._path) as conn:
-            conn.executescript(PARTICIPANT_SCHEMA)
+        # journal_mode=OFF avoids stale journal files on Azure Files (SMB)
+        conn = sqlite3.connect(self._path, timeout=30, isolation_level=None)
+        try:
+            conn.execute("PRAGMA busy_timeout = 30000")
+            conn.execute("PRAGMA journal_mode = OFF")
+            for stmt in PARTICIPANT_SCHEMA.strip().split(";"):
+                stmt = stmt.strip()
+                if stmt:
+                    conn.execute(stmt)
+            conn.execute("PRAGMA journal_mode = DELETE")
+        finally:
+            conn.close()
 
     def close(self) -> None:  # nothing pooled
         return None
@@ -60,7 +70,9 @@ class SqliteParticipantStore:
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self._path)
+        conn = sqlite3.connect(self._path, timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        conn.execute("PRAGMA journal_mode = DELETE")
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -171,8 +183,18 @@ class SqliteGuardianStore:
     # ----------------------------------------------------------- lifecycle
     def init(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self._path) as conn:
-            conn.executescript(GUARDIAN_SCHEMA)
+        # journal_mode=OFF avoids stale journal files on Azure Files (SMB)
+        conn = sqlite3.connect(self._path, timeout=30, isolation_level=None)
+        try:
+            conn.execute("PRAGMA busy_timeout = 30000")
+            conn.execute("PRAGMA journal_mode = OFF")
+            for stmt in GUARDIAN_SCHEMA.strip().split(";"):
+                stmt = stmt.strip()
+                if stmt:
+                    conn.execute(stmt)
+            conn.execute("PRAGMA journal_mode = DELETE")
+        finally:
+            conn.close()
 
     def close(self) -> None:
         return None
@@ -180,7 +202,9 @@ class SqliteGuardianStore:
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self._path)
+        conn = sqlite3.connect(self._path, timeout=30)
+        conn.execute("PRAGMA busy_timeout = 30000")
+        conn.execute("PRAGMA journal_mode = DELETE")
         conn.row_factory = sqlite3.Row
         try:
             yield conn

@@ -40,6 +40,8 @@ from .store import (
     ParticipantStore,
     SqliteGuardianStore,
     SqliteParticipantStore,
+    SqliteSystemStore,
+    SystemStore,
 )
 
 __all__ = [
@@ -56,8 +58,10 @@ __all__ = [
     # extension points
     "ParticipantStore",
     "GuardianStore",
+    "SystemStore",
     "SqliteParticipantStore",
     "SqliteGuardianStore",
+    "SqliteSystemStore",
     "KnowledgeBase",
     "RetrievedDoc",
     "AzureSearchKB",

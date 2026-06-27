@@ -136,6 +136,7 @@ class SessionState:
     session_id: str
     student_context: StudentContext
     conversation_history: list[dict]
+    student_id: Optional[str] = None
 
 
 @dataclass

@@ -6,15 +6,18 @@ answers**, while a separate Guardian agent enforces academic integrity by
 classifying every question and verifying every draft response before it reaches
 the student.
 
-The repo is split in two:
+The system runs as two processes:
 
+- **`server/`** — a [FastAPI](https://fastapi.tiangolo.com/) backend that hosts
+  the `LabHarness` and all agent logic. Owns session state, LLM clients, and
+  SQLite stores. Future instructor-dashboard endpoints also live here.
+- **`app.py`** — a thin [Chainlit](https://chainlit.io) client that forwards
+  every turn to the server over HTTP and renders streamed step-progress events
+  via SSE. It holds only a `session_id` per user and imports nothing from the
+  core package.
 - **`agentic_system/`** — a UI-agnostic Python package that owns all the agents,
   policy, storage, retrieval, and LLM integration. It exposes a single facade,
-  `LabHarness`, and knows nothing about the web framework hosting it.
-- **`app.py`** — a thin [Chainlit](https://chainlit.io) shell that wires the
-  harness into a chat UI. It is the *only* place Chainlit is imported;
-  swapping it for a CLI, a custom frontend, or a Slack bot requires no changes
-  inside the package.
+  `LabHarness`, and knows nothing about either the web framework or the server.
 
 ## How it works
 
@@ -124,8 +127,15 @@ class MyLLMClient:
 
 ```
 adfel_agentic_system/
-├── app.py                       Chainlit UI shell (only place chainlit is imported)
-├── agentic_system/              UI-agnostic package
+├── app.py                       Chainlit client (thin HTTP/SSE proxy to server)
+├── server/                      FastAPI backend
+│   ├── main.py                  App + lifespan (builds LabHarness)
+│   ├── schemas.py               Pydantic request/response models
+│   ├── session_store.py         In-memory session registry with TTL
+│   └── routes/
+│       ├── student.py           Session + turn endpoints (SSE streaming)
+│       └── instructor.py        Stub for future dashboard routes
+├── agentic_system/              UI-agnostic core package
 │   ├── __init__.py              Public re-exports
 │   ├── api.py                   LabHarness facade — single public entry point
 │   ├── config.py                SystemConfig dataclass + from_env()
@@ -149,13 +159,14 @@ adfel_agentic_system/
 │   └── store/
 │       ├── base.py              ParticipantStore + GuardianStore Protocols
 │       └── sqlite.py            Default SQLite implementations of both
-├── data/                        SQLite files live here (gitignored)
+├── data/                        SQLite files live here (gitignored, local dev only)
 ├── public/                      Chainlit static assets (logo, favicon, theme)
 ├── pixi.toml                    Local dev environment + tasks
-├── requirements.txt             Pip dependencies (mirrors pixi for Docker)
-├── Dockerfile                   Container build
-├── docker-compose.yml           One-command local container run
-└── config.yaml                  Azure Container App deployment manifest
+├── requirements-server.txt      Server pip dependencies
+├── requirements-client.txt      Client pip dependencies
+├── Dockerfile                   Client container build
+├── Dockerfile.server            Server container build
+└── docker-compose.yml           Two-service container run (server + client)
 ```
 
 ## Local development
@@ -170,29 +181,31 @@ $EDITOR .env
 # 2. install dependencies
 pixi install
 
-# 3. run the Chainlit dev server (auto-reload on save)
-pixi run dev
-# → http://localhost:8000
+# 3. run server and client in separate terminals:
+pixi run dev-server     # uvicorn server.main:app --reload --port 8080
+pixi run dev-client     # chainlit run app.py -w → http://localhost:8000
 ```
 
 Other tasks:
 
 ```bash
-pixi run start      # production-style: chainlit run -h --host 0.0.0.0 --port 8000
-pixi run reset-db   # nuke local SQLite stores under data/
+pixi run start-server   # production: uvicorn --host 0.0.0.0 --port 8080
+pixi run start-client   # production: chainlit run -h --host 0.0.0.0 --port 8000
+pixi run reset-db       # nuke local SQLite stores under data/
 ```
 
 `pixi.toml` sets `PARTICIPANT_DB_PATH` and `GUARDIAN_DB_PATH` to absolute
-paths under `data/` automatically when the env activates.
-
-### Running with Docker
+paths under `data/` automatically when the env activates. ### Running with Docker
 
 ```bash
 docker compose up --build
 ```
 
-`docker-compose.yml` mounts `./data` to `/data` inside the container so the
-SQLite files persist across restarts.
+`docker-compose.yml` runs two services: `server` (port 8080) and `client`
+(port 8000). The server mounts `./data` to `/data` for SQLite persistence
+in local dev. Set `CAS_MOCK=1` (plus `SESSION_JWT_SECRET` and
+`CHAINLIT_AUTH_SECRET`) in `.env` to run the full CAS login flow locally
+without a live Cal Poly IdP.
 
 ## Environment variables
 
@@ -211,6 +224,17 @@ or in `app.py`. The agents themselves never touch `os.environ`.
 | `STUDENT_ID` | no | Single-user prototype identity. Default `default-student`. |
 | `LAB_ID` | no | Default `default-lab`. |
 | `COURSE_ID` | no | Default `CSC580`. |
+| `ADFEL_SERVER_URL` | no² | Client needs this to reach the server. Default `http://localhost:8080`. |
+| `CAS_BASE_URL` | no³ | Cal Poly CAS base (from ITS), e.g. `https://cas.calpoly.edu/cas`. |
+| `CAS_SERVICE_URL` | no³ | This app's approved callback, e.g. `https://<host>/login/cas/callback`. Must match ITS registration byte-for-byte. |
+| `CAS_EMAIL_DOMAIN` | no | Synthesizes `<netid>@domain` when CAS omits email. Default `calpoly.edu`. |
+| `CAS_MOCK` | no³ | `1` runs the login flow against a fixed mock netid (local dev). Set on **both** server and client. |
+| `SESSION_JWT_SECRET` | no³ | Server-side secret (32+ bytes) signing the API session token. Required for real or mock CAS. |
+| `SESSION_JWT_TTL` | no | Session token lifetime in seconds. Default `28800` (8h). |
+| `CHAINLIT_AUTH_SECRET` | no³ | Signs Chainlit's own session. Required once any client auth callback is enabled. |
+| `ADFEL_COOKIE_SECURE` | no | `1` marks the client session cookie `Secure` (HTTPS). Leave blank for `http://localhost`. |
+| `ADFEL_ADMIN_EMAIL` | no | Bootstrapped as the admin user; binds to a netid on first CAS login. |
+| `ADFEL_DEV_AUTH_BYPASS` | no | `1` skips auth entirely (server impersonates the admin). Coarser than `CAS_MOCK`. |
 | `PARTICIPANT_DB_PATH` | no | Default `data/participant.db`. |
 | `GUARDIAN_DB_PATH` | no | Default `data/guardian.db`. |
 | `RAG_TOP_N` | no | How many docs to retrieve. Default `3`. |
@@ -222,6 +246,17 @@ or in `app.py`. The agents themselves never touch `os.environ`.
 ¹ Only required if you don't inject your own `LLMClient` into
 `LabHarness.build(llm=...)`. Using `ClaudeLLM` instead requires
 `ANTHROPIC_API_KEY` (or an explicit `api_key=` / `auth_token=`).
+
+² Required by the Chainlit client. Set in `docker-compose.yml` automatically
+(`http://server:8080`).
+
+³ Auth wiring. Students sign in with Cal Poly CAS: the client redirects the
+browser to CAS, the server validates the ticket and mints a session JWT, and
+the client carries it as a Bearer token. `CAS_BASE_URL` / `CAS_SERVICE_URL`
+live on both processes; `SESSION_JWT_SECRET` is server-side; `CHAINLIT_AUTH_SECRET`
+is client-side. For local dev set `CAS_MOCK=1` on both (no live IdP needed).
+Real endpoints come from a Cal Poly ITS project request — see the deployment
+section.
 
 ## Policy at a glance
 
@@ -258,22 +293,69 @@ KB error proceeds with empty context; a companion error returns a polite
 
 ## Azure deployment
 
-The app currently deploys as an Azure Container App
-(`config.yaml`). Beyond Azure OpenAI itself, you will typically also want:
+The system deploys as two Azure Container Apps in a shared Container Apps
+Environment:
 
-- **Azure AI Foundry** — host the chat-model deployment, and (if RAG is on)
-  the embedding-model deployment used to build the Search index.
-- **Azure AI Search** — host the index. Configure a skillset to chunk
-  documents and produce embeddings via the Foundry embedding deployment.
-  Index field names expected by `AzureSearchKB`: `parent_id`, `chunk_id`,
-  `chunk`, `title`.
-- **Azure Storage** — Blob for the documents that feed AI Search; an Azure
-  Files share if you want SQLite stores to persist across container
-  restarts (mount it into the container at the path you point
-  `PARTICIPANT_DB_PATH` / `GUARDIAN_DB_PATH` to).
-- **Container Registry + Container App + Container Apps Environment** —
-  see `config.yaml` for the deployed resource shape.
+| Container | Image | Ingress | Port | Purpose |
+|---|---|---|---|---|
+| `adfel-server` | `adfel-server:v1` | **Internal** | 8080 | FastAPI backend — agent logic, SQLite stores, LLM clients |
+| `adfel-client` | `adfel-client:v1` | **External** | 8000 | Chainlit UI — Cal Poly CAS SSO, proxies to server |
 
-> ⚠️ Azure AI Search truncates documents above its size limit and rejects
+The server is only reachable from within the Container Apps Environment
+(internal ingress). The client is the public-facing entry point; students
+authenticate with Cal Poly CAS. The client's public URL (its
+`/login/cas/callback`) is the `CAS_SERVICE_URL` that must be registered with
+Cal Poly ITS via an [ITS project request](https://tech.calpoly.edu/its-project-request-form);
+those endpoints don't exist until ITS provisions the integration. Until then,
+run with `CAS_MOCK=1`.
+
+### Infrastructure
+
+- **Container Registry** (`x80registry.azurecr.io`) — hosts the two images.
+- **Container Apps Environment** (`x80-environment`) — shared networking
+  for both apps; the client reaches the server at its internal FQDN.
+- **Azure AI Foundry** — hosts the chat-model deployment, and (if RAG is
+  on) the embedding-model deployment used to build the Search index.
+- **Azure AI Search** — hosts the RAG index. Index field names expected by
+  `AzureSearchKB`: `parent_id`, `chunk_id`, `chunk`, `title`.
+- **Azure Storage** — Blob storage for documents that feed AI Search.
+
+### SQLite persistence
+
+SQLite databases live on the server container's **ephemeral storage**
+(not Azure Files). SQLite's file locking is incompatible with Azure Files
+SMB, so databases use a local EmptyDir volume instead. Data persists as
+long as the single server replica is alive (`minReplicas: 1`,
+`maxReplicas: 1`). A container restart resets both databases — acceptable
+for the prototype since session data is transient and the system is
+designed to rebuild context from scratch.
+
+For durable persistence in a future production deployment, replace the
+SQLite stores with a `ParticipantStore` / `GuardianStore` implementation
+backed by Azure PostgreSQL Flexible Server or Cosmos DB.
+
+### Deploying
+
+```bash
+# Build and push images (requires az login + az acr login):
+az acr build -r x80registry -t adfel-server:v1 -f Dockerfile.server .
+az acr build -r x80registry -t adfel-client:v1 -f Dockerfile .
+
+# After updating images, force a new revision on each app:
+az containerapp update -n adfel-server -g x80_assistant_group --revision-suffix <tag>
+az containerapp update -n adfel-client -g x80_assistant_group --revision-suffix <tag>
+```
+
+Env vars and secrets are configured directly on the container apps (not
+committed to the repo). To update them:
+
+```bash
+az containerapp update -n adfel-server -g x80_assistant_group \
+  --set-env-vars KEY=value ...
+az containerapp update -n adfel-client -g x80_assistant_group \
+  --set-env-vars CAS_BASE_URL=... CAS_SERVICE_URL=... CHAINLIT_AUTH_SECRET=... ...
+```
+
+> Note: Azure AI Search truncates documents above its size limit and rejects
 > oversized files outright. When uploading textbook material, split it
 > manually into per-chapter or per-section files before indexing.

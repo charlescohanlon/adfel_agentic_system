@@ -57,25 +57,27 @@ class Orchestrator:
         self._kb = knowledge_base
 
     # -------------------------------------------------------- lifecycle
-    def start_session(self) -> SessionState:
+    def start_session(self, student_id: Optional[str] = None) -> SessionState:
         session_id = str(uuid.uuid4())
-        student_context = self._participant.get_student_context(self._config.student_id)
+        sid = student_id or self._config.student_id
+        student_context = self._participant.get_student_context(sid)
         self._guardian.session_start(
-            student_id=self._config.student_id,
+            student_id=sid,
             session_id=session_id,
             lab_id=self._config.lab_id,
             course_id=self._config.course_id,
         )
-        logger.info("Session started: %s", session_id)
+        logger.info("Session started: %s (student_id=%s)", session_id, sid)
         return SessionState(
             session_id=session_id,
             student_context=student_context,
             conversation_history=[],
+            student_id=sid,
         )
 
     def end_session(self, state: SessionState) -> None:
         self._guardian.session_end(
-            student_id=self._config.student_id,
+            student_id=state.student_id or self._config.student_id,
             session_id=state.session_id,
         )
         logger.info("Session ended: %s", state.session_id)
@@ -110,9 +112,10 @@ class Orchestrator:
             )
 
         # 2. Validate — passes rag_docs so classifier can apply the KB match rule.
+        sid = state.student_id or self._config.student_id
         try:
             validation = self._guardian.validate(
-                student_id=self._config.student_id,
+                student_id=sid,
                 session_id=state.session_id,
                 lab_id=self._config.lab_id,
                 question_text=question,
@@ -244,7 +247,7 @@ class Orchestrator:
 
             try:
                 verify = self._guardian.verify(
-                    student_id=self._config.student_id,
+                    student_id=state.student_id or self._config.student_id,
                     session_id=state.session_id,
                     question_text=question,
                     draft_response=draft,
@@ -258,7 +261,7 @@ class Orchestrator:
                 if on_step:
                     label = f"attempt {attempt + 1}" if attempt > 0 else "first attempt"
                     on_step("Lab Companion · Response Generation", "llm", f"Draft generated ({label}).")
-                    on_step("Guardian · Output Verification", "tool", "✅ Passed (verifier error — fail-open).")
+                    on_step("Guardian · Output Verification", "tool", "Passed (verifier error — fail-open).")
                 return draft, verify, attempt, False
 
             last_verify = verify
@@ -267,7 +270,7 @@ class Orchestrator:
                 label = f"attempt {attempt + 1}" if attempt > 0 else "first attempt"
                 on_step("Lab Companion · Response Generation", "llm", f"Draft generated ({label}).")
                 verify_out = (
-                    "✅ Response passed output verification."
+                    "Response passed output verification."
                     if verify.passes
                     else f"Draft rejected — _{verify.reason or 'no reason given'}_ — retrying."
                 )
@@ -305,7 +308,7 @@ class Orchestrator:
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         try:
             self._participant.log_interaction(
-                student_id=self._config.student_id,
+                student_id=state.student_id or self._config.student_id,
                 session_id=state.session_id,
                 message=question,
                 response_time_ms=elapsed_ms,
@@ -319,7 +322,6 @@ class Orchestrator:
         state.conversation_history.append({"role": "assistant", "content": response})
 
 
-_GUIDANCE_EMOJI = {"FULL": "🟢", "MODERATE": "🟡", "MINIMAL": "🟠", "REJECTED": "🔴"}
 _CLASS_LABEL = {
     "CONCEPTUAL": "Conceptual", "PROCEDURAL": "Procedural",
     "CLARIFICATION": "Clarification", "DIRECT_SOLUTION": "Direct Solution",
@@ -340,13 +342,12 @@ def _fmt_rag_sources(rag_docs: list) -> str:
 
 
 def _fmt_validate(v: ValidateResult) -> str:
-    emoji = _GUIDANCE_EMOJI.get(v.guidance_level.value, "⚪")
     cls = _CLASS_LABEL.get(v.classification.value, v.classification.value)
     lines = [
         f"**Classification:** {cls}",
-        f"**Guidance level:** {emoji} {v.guidance_level.value}",
+        f"**Guidance level:** {v.guidance_level.value}",
         f"**{'Violation detected' if v.violation_detected else 'No violation'}** — session total: {v.violation_count}",
     ]
     if v.session_escalated:
-        lines.append("⛔ **Session escalated** — integrity threshold reached")
+        lines.append("**Session escalated** — integrity threshold reached")
     return "\n".join(lines)

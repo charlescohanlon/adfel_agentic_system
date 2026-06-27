@@ -1,17 +1,20 @@
 """Storage abstraction for the ADFEL harness.
 
-Two protocols — `ParticipantStore` and `GuardianStore` — define the entire
-persistence surface. The default implementations are SQLite-backed
-(`SqliteParticipantStore`, `SqliteGuardianStore`); a future remote-API
-implementation only has to satisfy the same protocols.
+Three protocols — `ParticipantStore`, `GuardianStore`, `SystemStore` —
+define the entire persistence surface. The first two are per-course
+(injected into `LabHarness`); `SystemStore` holds multi-tenant
+metadata (users, courses, enrollments) and is used by the server layer.
 """
 
-from .base import GuardianStore, ParticipantStore
+from .base import GuardianStore, ParticipantStore, SystemStore
 from .sqlite import SqliteGuardianStore, SqliteParticipantStore
+from .system import SqliteSystemStore
 
 __all__ = [
     "ParticipantStore",
     "GuardianStore",
+    "SystemStore",
     "SqliteParticipantStore",
     "SqliteGuardianStore",
+    "SqliteSystemStore",
 ]
